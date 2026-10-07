@@ -1,0 +1,51 @@
+# Keil MDK 构建产物（输出目录/用户界面状态/依赖缓存）
+G474/MDK-ARM/G474/
+**/MDK-ARM/G474/
+*.uvguix.*
+*.uvoptx
+*.bak
+*_sct.Bak
+*.dep
+*.crf
+*.o
+*.d
+*.axf
+*.lnp
+*.htm
+*.build_log.htm
+*.log
+
+# 本工程的双工程产物默认输出名
+#   注意：不可写成裸 `BL.hex` / `G474.hex` —— 无路径限定时会连带忽略
+#   firmware/ 下的基线烧写件（实测：`BL.hex` 命中 `firmware/BL.hex`）。
+#   firmware/ 下的 hex 是**烧写基线**不是构建产物，必须纳入版本控制。
+#   这里的构建产物已由上面的 `G474/MDK-ARM/*/` 规则覆盖，锚定写法更保险：
+/BL.hex
+/G474.hex
+G474/MDK-ARM/BL/BL.hex
+G474/MDK-ARM/G474/G474.hex
+
+# 链接/映射产物
+*.map
+*.sct
+*.scvd
+
+# Python
+__pycache__/
+*.pyc
+
+# 上位机生成的报文记录
+# 上位机生成的报文记录（可能在仓库根或 tools/ 下）
+can_log_*.csv
+tools/can_log_*.csv
+
+# 设备验证输出（可重新生成）
+ota/verify/*_output.txt
+ota/bootloader/verify_bl_output.txt
+
+# WorkBuddy 本地元数据（项目会话记忆等，不属于源码）
+.workbuddy/
+
+# 串口抓包
+*.cap
+serial_*.log

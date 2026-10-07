@@ -1,0 +1,31 @@
+# Keil MDK 构建产物（输出目录/用户界面状态/依赖缓存）
+G474/MDK-ARM/G474/
+**/MDK-ARM/G474/
+*.uvguix.*
+*.uvoptx
+*.bak
+*_sct.Bak
+*.dep
+*.crf
+*.o
+*.d
+*.axf
+*.lnp
+*.htm
+*.build_log.htm
+*.log
+
+# 本工程的双工程产物默认输出名
+BL.hex
+G474.hex
+
+# Python
+__pycache__/
+*.pyc
+
+# 上位机生成的报文记录
+tools/can_log_*.csv
+
+# 设备验证输出（可重新生成）
+ota/verify/*_output.txt
+ota/bootloader/verify_bl_output.txt
