@@ -176,6 +176,65 @@ CASES = [
      patch_sub("ota/tools/ota_host.py",
                r"stmin_s\s*=\s*isotp_stmin_to_seconds\(raw_stmin\)",
                "stmin_s = 0.0  # 忽略 STmin")),
+
+    # ============================ 第三梯队（M1~M5 / M7 / M10~M12 / L2~L8）============================
+    #  M1 本体：把 loadAddr 校验锚点改回 hdrAddr —— 镜像头恒在 slotBase+0（血线 11），
+    #  搜索一旦命中净荷区内的假头，hdrAddr 就会偏移 0x80，整条校验形同虚设。
+    ("[C12]", "【M1 本体】loadAddr 校验锚点退回 hdrAddr（假头使偏移漂移 0x80）",
+     patch_sub("ota/bootloader/Core/Src/bl_image.c",
+               r"loadAddr\s*!=\s*\(\s*slotBase\s*\+\s*OTA_IMG_HDR_SIZE\s*\)",
+               "loadAddr != (hdrAddr + OTA_IMG_HDR_SIZE)")),
+    #  M1 本体：契约把搜索范围放回 2 个位置 —— 第二个位置会伸进净荷区
+    ("[C12]", "【M1 本体】契约把 OTA_IMG_HDR_SEARCH_N 改回 2（搜索伸进净荷区）",
+     patch_sub("ota/common/ota_common.h",
+               r"#define\s+OTA_IMG_HDR_SEARCH_N\s+1U",
+               "#define OTA_IMG_HDR_SEARCH_N     2U")),
+    #  M2 本体：只查 payload <= 槽大小，不扣 0x80 头保留区 -> APP 基址 + 净荷可越槽尾
+    ("[C12]", "【M2 本体】净荷长度只受槽大小约束（不再扣 0x80 头保留区）",
+     patch_sub("ota/bootloader/Core/Src/bl_image.c",
+               r"\(payloadSize\s*>\s*\(\s*OTA_SLOT_SIZE\s*-\s*OTA_IMG_HDR_SIZE\s*\)\)",
+               "(payloadSize > OTA_SLOT_SIZE)")),
+    #  M3 本体：SP 下界去掉等号 -> sp == 0x20000000 时栈向 RAM 首字节下方长，必 HardFault
+    #  注入点必须带上 `if ((` 前缀：bl_image.c 的**注释里**也写着
+    #  "由 `sp < BL_IRAM_BASE` 改为 `sp <= BL_IRAM_BASE`"，而 patch_sub 只替换
+    #  第一个匹配（count=1），裸模式会打在注释上、代码纹丝不动 -> 假漏网。
+    ("[C12]", "【M3 本体】SP 下界退回 < BL_IRAM_BASE（sp 恰为 IRAM 首字节时栈向下越界）",
+     patch_sub("ota/bootloader/Core/Src/bl_image.c",
+               r"if\s*\(\(\(sp\s*%\s*8U\)\s*!=\s*0U\)\s*\|\|\s*\(sp\s*<=\s*BL_IRAM_BASE\)",
+               "if (((sp % 8U) != 0U) || (sp < BL_IRAM_BASE)")),
+    #  M4 本体：把死代码 BL_FlashReadWords 复活（零边界检查 + 返回 void 无法报错）
+    #  锚点用 .h 里的整段删除说明（三行注释块），避免因空白差异匹配失败
+    ("[C12]", "【M4 本体】复活已删除的 BL_FlashReadWords（无边界检查的死代码）",
+     patch_sub("ota/bootloader/Core/Inc/bl_flash_if.h",
+               r"/\* 注：原有 BL_FlashReadWords\(\)[\s\S]*?自行保证地址范围（bl_image\.c / bl_param\.c 即如此，且各有槽/页白名单）。\s*\*/",
+               "uint32_t BL_FlashReadWords(uint32_t addr, uint32_t words, uint32_t *out);")),
+    #  M5 本体：只读的 BL_FlashVerify 传 allowCfg=true -> 读路径上放行控制区两页
+    ("[C12]", "【M5 本体】BL_FlashVerify 白名单传 true（在读路径上放行控制区）",
+     patch_sub("ota/bootloader/Core/Src/bl_flash_if.c",
+               r"BL_FlashRegionAllowed\(addr,\s*len,\s*false\)",
+               "BL_FlashRegionAllowed(addr, len, true)")),
+    #  L6 本体：0x78 循环每次重置完整 timeout -> 设备持续发 0x78 时主机无限挂死
+    ("[C12]", "【L6 本体】0x78 等待每次重置完整 timeout（旧形态=无限挂死）",
+     patch_sub("ota/tools/ota_host.py",
+               r"rsp = self\.isotp\.receive_message\(remain\)",
+               "rsp = self.isotp.receive_message(timeout)")),
+    #  L4 本体：seq 裸 +1 回绕 -> 0xFFFFFFFF 后"取最新"会把最新配置当最旧丢弃
+    ("[C12]", "【L4 本体】seq 退回裸 +1（0xFFFFFFFF 后回绕，最新配置被当最旧丢弃）",
+     patch_sub("ota/bootloader/Core/Src/bl_param.c",
+               r"target\.seq\s*=\s*0xFFFFFFFFU;\s*/\*[^*]*\*/",
+               "target.seq = (s_cfg.seq + 1U);  /* 退回裸 +1 */")),
+    #  L3 本体：把语义校验从唯一有效性入口里摘掉 -> CRC 只能证明"没传错"，不证明语义
+    ("[C12]", "【L3 本体】BL_ParamIsValidAt 不再调用语义校验（CRC 有效但语义荒谬也算数）",
+     patch_sub("ota/bootloader/Core/Src/bl_param.c",
+               r"if\s*\(!\s*BL_ParamContentSane\([^)]*\)\s*\)\s*\n\s*\{[^}]*\}",
+               "(void)0;")),
+    #  M10 本体：删掉续传的 8 对齐前置校验 -> 隐式约束不再被显式检查
+    #  锚点用 `if (bs % 8) != 0:` 这一行本身（后面的 raise 是多行 f-string，
+    #  用 `[^)]*` 跨不过换行）
+    ("[C12]", "【M10 本体】删掉续传的块大小 8 对齐前置校验（回到笼统 NRC）",
+     patch_sub("ota/tools/ota_host.py",
+               r"if\s*\(bs\s*%\s*8\)\s*!=\s*0:",
+               "if False:  # 注入：跳过 8 对齐前置校验")),
 ]
 
 

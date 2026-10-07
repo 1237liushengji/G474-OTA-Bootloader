@@ -510,9 +510,19 @@ def main():
         ok12 = ok12 and ref_ok
         ev12.append("  bl_param.c 引用契约偏移宏 = %s" % ref_ok)
         ev12 += ev("Core/Src/bl_param.c", param_c, r"OTA_CFG_SLOT_OFFSET, OTA_CFG_SLOT_MIRROR_OFF")
-        img_ok = re.search(r"loadAddr != \(hdrAddr \+ OTA_IMG_HDR_SIZE\)", image_c) is not None
+        # 【M1 修复 2026-10-07】APP 基址必须锚定 **slotBase**（槽首），
+        # 不能再锚定 hdrAddr（镜像头地址）。原判定硬编码 `hdrAddr +` 已被 M1 淘汰：
+        # 镜像头恒在 slotBase+0（血线 11），一旦搜索命中净荷区内的假头，
+        # 以 hdrAddr 为锚点会整体偏移 0x80，使 loadAddr 校验形同虚设。
+        img_ok = (re.search(r"loadAddr\s*!=\s*\(\s*slotBase\s*\+\s*OTA_IMG_HDR_SIZE\s*\)",
+                            image_c) is not None)
+        # 反向断言：代码中不得残留以 hdrAddr 为锚点的推导
+        no_hdr_anchor = re.search(r"loadAddr\s*!=\s*\(\s*hdrAddr", image_c) is None
+        img_ok = img_ok and no_hdr_anchor
         ok12 = ok12 and img_ok
-        ev12.append("  bl_image.c 用 OTA_IMG_HDR_SIZE 推导 APP 基址 = %s" % img_ok)
+        ev12.append("  bl_image.c 用 slotBase+OTA_IMG_HDR_SIZE 推导 APP 基址（M1 修复后锚点）= %s"
+                    % img_ok)
+        ev12.append("  bl_image.c 未残留 hdrAddr 锚点（假头会让偏移漂移 0x80）= %s" % no_hdr_anchor)
 
         # BL_BUILD.md 必须写明与契约一致的地址；且不得残留旧 Slot A 基址
         tokens = [

@@ -933,6 +933,253 @@ def check_c11_handover_and_fc(root, v, bl_jump, bl_param, host_text):
                  ev_list)
 
 
+def strip_c_comments(text):
+    """剔除 C 注释，只留真实代码。
+
+    这是 C12 的核心工具：判定必须只看**代码**，不能看注释。原因——修复说明里
+    必然会引用被删掉的旧写法（如"原有 BL_FlashReadWords() 已删除"、"由 sp <
+    BL_IRAM_BASE 改为 <="），裸子串匹配会把这些说明当成"缺陷仍在"，产生假失败。
+    """
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    return re.sub(r"//[^\n]*", " ", text)
+
+
+def check_c12_third_tier(root, v, bl_image, bl_flashif, bl_flashif_h, bl_diag,
+                         bl_param, bl_main_c, common_h, host_text):
+    """第三梯队守卫（2026-10-07 新增，覆盖 M1~M5 / M7 / M10~M12 / L2~L7 / L8）。
+
+    与 C11 同源的教训：这些缺陷的共性都是"**缺少一个必须存在的动作或校验**"，
+    逐条单测都测不到（它们要么只在畸形输入下发生，要么需要真实硬件时序）。
+
+    逐条依据：
+    M1（bl_image.c / ota_common.h）：镜像头**恒在槽首 slotBase+0**，原实现让
+        loadAddr 校验锚定 `hdrAddr + OTA_IMG_HDR_SIZE`。一旦搜索命中净荷区内的假
+        头，锚点就会偏移 0x80，APP 基址校验形同虚设 -> 跳进固件中间 HardFault。
+        契约侧 OTA_IMG_HDR_SEARCH_N 已由 2 锁死为 1（血线 11）。
+    M2（bl_image.c）：净荷长度必须双重受限（<= 槽大小 且 <= 槽大小 - 头保留区），
+        只查前者会让 APP 基址 + payload 越出槽尾。
+    M3（bl_image.c）：SP 下界必须是 `sp <= BL_IRAM_BASE`（含等号）。sp 恰等于
+        0x20000000 时栈向 RAM 首字节**下方**长，第一次压栈就写 0x1FFFFFF 必然 HardFault。
+    M4（bl_flash_if.c/.h）：BL_FlashReadWords 零调用点、无边界检查、返回 void
+        无法报错 -> 已整函数删除，守卫确保它不会复活。
+    M5（bl_flash_if.c）：只读函数 BL_FlashVerify 传 `true` 给白名单校验，
+        等于在读路径上放行控制区两页。
+    M7（bl_diag.c）：FF01 校验前必须先查会话参数（receivedLen!=0、startAddr>=appBase），
+        否则 CRC32(空区间)恒为 0，会给出"看着合法的错误答案"。
+    M10（ota_host.py）：续传的三条 8 对齐约束必须显式前置校验。
+    M11（bl_isotp.c）：非 WAIT_FC 的 FC 必须计数，不能静默吞掉。
+    L2（ota_common.h / bl_diag.c）：子功能比较必须屏蔽 suppressPosRsp(bit7)。
+    L3（bl_param.c）：CRC 只能证明"没传错"，还要校验 state/trialLeft 语义。
+    L4（bl_param.c）：seq 必须饱和递增，否则回绕会把最新配置当最旧丢弃。
+    L6（ota_host.py）：0x78 等待必须用**累计** deadline，不能每次重置 timeout。
+    L8（main.c）：试运行次数注释必须与"递减先于跳转"的实际时序一致。
+    """
+    ev_list = []
+    ok = True
+
+    def sub(flag, msg):
+        nonlocal ok
+        ok = ok and bool(flag)
+        ev_list.append("  %s -> %s" % (msg, "OK" if flag else "[!!] FAIL"))
+
+    # 所有 C 判定一律基于"剔注释后的代码"，避免修复说明里的旧写法造成假失败
+    code_image = strip_c_comments(bl_image)
+    code_flashif = strip_c_comments(bl_flashif)
+    code_flashif_h = strip_c_comments(bl_flashif_h)
+    code_diag = strip_c_comments(bl_diag)
+    code_param = strip_c_comments(bl_param)
+
+    # --- M1：契约 SEARCH_N 必须为 1，且有编译期守卫 ---
+    if not common_h:
+        ev_list.append("  [!!] ota_common.h 缺失，无法核对 M1")
+        ok = False
+    else:
+        n = int(v.get("OTA_IMG_HDR_SEARCH_N", -1)) if v else -1
+        sub(n == 1, "M1 契约 OTA_IMG_HDR_SEARCH_N = %r（须为 1：头恒在槽首）" % n)
+        # 编译期守卫必须在场，否则有人会直接把宏改回 2 而守卫毫无反应
+        has_err = "#error" in common_h and "OTA_IMG_HDR_SEARCH_N" in common_h
+        sub(has_err, "M1 存在针对 SEARCH_N 的 #error 编译期守卫（防止被改回 2）")
+
+    # --- M1/M2/M3：bl_image.c 的锚点与边界 ---
+    if not bl_image:
+        ev_list.append("  [!!] bl_image.c 缺失，无法核对 M1/M2/M3")
+        ok = False
+    else:
+        # 锚点必须是 slotBase（+OTA_IMG_HDR_SIZE），不能是 hdrAddr
+        anchored = re.search(r"slotBase\s*\+\s*OTA_IMG_HDR_SIZE", code_image) is not None
+        anchored = anchored or re.search(r"info\s*->\s*appBase\s*=\s*[a-zA-Z_]*\s*"
+                                         r"*\+\s*OTA_IMG_HDR_SIZE", code_image) is not None
+        bad = re.search(r"hdrAddr\s*\+\s*OTA_IMG_HDR_SIZE\s*(\)|;|/|,)", code_image) is not None
+        sub(anchored and not bad,
+            "M1 loadAddr/appBase 锚定 slotBase+OTA_IMG_HDR_SIZE（而非 hdrAddr+...）")
+        ev_list += ev("bl_image.c: appBase", code_image, r"appBase\s*=\s*[^;]*OTA_IMG_HDR_SIZE")
+
+        # M2：净荷长度双重限制
+        has_size = re.search(r"OTA_SLOT_SIZE\s*-\s*OTA_IMG_HDR_SIZE", code_image) is not None
+        sub(has_size, "M2 净荷长度同时受 (槽大小 - 头保留区) 约束")
+
+        # M3：SP 下界必须用 <=（只看代码，注释里的旧写法 sp < BL_IRAM_BASE 不算）
+        sp_le = re.search(r"sp\s*<=\s*BL_IRAM_BASE", code_image) is not None
+        sp_lt = re.search(r"sp\s*<\s*BL_IRAM_BASE", code_image) is not None
+        sub(sp_le and not sp_lt,
+            "M3 SP 下界用 <= BL_IRAM_BASE（含等号，防栈向下越界）")
+        ev_list += ev("bl_image.c: SP 边界", code_image,
+                      r"sp\s*<=\s*BL_IRAM_BASE[\s\S]{0,80}?sp\s*>\s*BL_IRAM_END")
+
+    # --- M4：BL_FlashReadWords 必须已被删除（只看代码：.h 里的删除说明注释不算）---
+    dead_gone = ("BL_FlashReadWords" not in code_flashif) and ("BL_FlashReadWords" not in code_flashif_h)
+    sub(dead_gone, "M4 BL_FlashReadWords 已彻底删除（含 .h 声明），无复活")
+
+    # --- M5：BL_FlashVerify 只读，不得传 true 放行控制区 ---
+    # 注意返回类型是 OTA_FlashResult 而非 bool，故用宽松的"函数名 + 紧跟花括号"定位
+    mv = re.search(r"BL_FlashVerify\s*\([^)]*\)\s*\{(.*?)\n\}", code_flashif, re.S)
+    vbody = mv.group(1) if mv else ""
+    # 取 BL_FlashRegionAllowed(...) 的**最后一个**实参（allowCfg）
+    margs = re.findall(r"BL_FlashRegionAllowed\s*\([^;]*?,\s*(true|false)\s*\)", vbody)
+    has_true = any(a == "true" for a in margs)
+    sub(bool(vbody) and bool(margs) and not has_true,
+        "M5 BL_FlashVerify 的白名单校验未传 true（只读函数不得放行控制区），实参=%s"
+        % (margs or "<无>"))
+
+    # --- M7：FF01 会话参数前置校验 ---
+    mv = re.search(r"BL_DiagRoutineVerify\s*\([^)]*\)\s*\{(.*?)\n\}", code_diag, re.S)
+    vbody7 = mv.group(1) if mv else ""
+    if not vbody7:
+        ev_list.append("  [!!] 未定位到 BL_DiagRoutineVerify() 函数体，无法核对 M7")
+        ok = False
+    else:
+        # 必须在 CRC 计算**之前**出现校验
+        crc_at = vbody7.find("BL_Crc32")
+        guard_at = min([p for p in (vbody7.find("receivedLen"),
+                                    vbody7.find("startAddr")) if p >= 0] or [-1])
+        good7 = crc_at > 0 and 0 <= guard_at < crc_at
+        sub(good7, "M7 FF01 在 BL_Crc32 之前校验 receivedLen/startAddr 会话参数")
+        sub(re.search(r"receivedLen\s*==\s*0U", vbody7) is not None,
+            "M7 显式拒绝 receivedLen==0（否则 CRC32(空)恒为 0）")
+        ev_list += ev("bl_diag.c: FF01 前置校验", code_diag,
+                      r"receivedLen\s*==\s*0U[\s\S]{0,120}?BL_DiagSend")
+
+    # --- M11：bl_isotp.c 的 FC 异常必须计数 ---
+    isotp_path = os.path.join(root, "ota", "bootloader", "Core", "Src", "bl_isotp.c")
+    isotp_c = read_text(isotp_path) if os.path.isfile(isotp_path) else ""
+    if isotp_c:
+        has_cnt = re.search(r"s_fcUnexpected", isotp_c) is not None
+        sub(has_cnt, "M11 bl_isotp.c 存在 FC 异常计数器 s_fcUnexpected（不再静默吞 FC）")
+    else:
+        ev_list.append("  [!!] bl_isotp.c 缺失，无法核对 M11")
+        ok = False
+
+    # --- L2：契约须有 SUBFUNC_MASK，BL 侧不得用裸 0x7F 比较子功能 ---
+    if common_h:
+        has_mask = ("UDS_SUBFUNC_MASK" in common_h) and ("UDS_SUPPRESS_POS_RSP" in common_h)
+        sub(has_mask, "L2 契约提供 UDS_SUBFUNC_MASK / UDS_SUPPRESS_POS_RSP（消除裸 0x7F）")
+    naked = re.findall(r"req\[1\]\s*&\s*0x7F", code_diag)
+    sub(not naked, "L2 bl_diag.c 无裸 `req[1] & 0x7F`（应引用 UDS_SUBFUNC_MASK），命中 %d 处" % len(naked))
+
+    # --- L3：副本有效性判定必须含语义校验 ---
+    has_sane = re.search(r"BL_ParamContentSane", code_param) is not None
+    sub(has_sane, "L3 bl_param.c 存在 BL_ParamContentSane()（CRC 之外还要校验语义）")
+    if has_sane:
+        # 必须接进"副本是否有效"的唯一入口
+        sub(re.search(r"BL_ParamIsValidAt\s*\([^)]*\)\s*\{(?:(?!\n\}).)*BL_ParamContentSane",
+                      code_param, re.S) is not None,
+            "L3 BL_ParamContentSane 已接入 BL_ParamIsValidAt()（否则校验形同虚设）")
+
+    # --- L4：seq 饱和递增，不得裸 +1 回绕 ---
+    saturate = re.search(r"0xFFFFFFFF", code_param) is not None
+    sub(saturate, "L4 bl_param.c 含 seq 饱和处理（0xFFFFFFFF 上界）")
+    # 反例形态：直接 (s_cfg.seq + 1U) 回绕
+    wraps = re.search(r"target\.seq\s*=\s*\(\s*s_cfg\.seq\s*\+\s*1U\s*\)", code_param) is not None
+    sub(not wraps, "L4 未出现裸 (s_cfg.seq + 1U) 赋值（会回绕）")
+    ev_list += ev("bl_param.c: seq 饱和", code_param,
+                  r"target\.seq\s*=\s*0xFFFFFFFFU")
+
+    # --- M10/L6：ota_host.py ---
+    if host_text:
+        # M10：三条 8 对齐前置校验。
+        # 必须匹配**可执行的条件判断**（`if (bs % 8) != 0:`），不能只查报错字符串——
+        # 否则把条件改成 `if False:` 保留报错文案的死代码，守卫照样放行。
+        has_bs = re.search(r"if\s*\(\s*bs\s*%\s*8\s*\)\s*!=\s*0\s*:", host_text) is not None
+        has_off = re.search(r"if\s*\(\s*offset\s*%\s*8\s*\)\s*!=\s*0\s*:", host_text) is not None
+        has_ad = re.search(r"if\s*\(\s*addr\s*%\s*8\s*\)\s*!=\s*0\s*:", host_text) is not None
+        sub(has_bs, "M10 续传前置校验：块大小 8 对齐（可执行条件判断，非死代码）")
+        sub(has_off and has_ad, "M10 续传前置校验：offset / addr 的 8 对齐")
+        # 三条校验必须在 resume 分支内、且在发第一帧之前
+        mr10 = re.search(r"if\s+self\.resume\s+is\s+not\s+None\s*:(.*?)\n\s*\n", host_text, re.S)
+        r10 = mr10.group(1) if mr10 else ""
+        sub(all(p in r10 for p in ("(bs % 8)", "(offset % 8)", "(addr % 8)")),
+            "M10 三条对齐校验都在 `if self.resume is not None:` 分支内")
+        ev_list += ev("ota_host.py: 续传前置校验", r10, r"if\s*\(\s*bs\s*%\s*8\s*\)\s*!=\s*0\s*:")
+
+        # L6：0x78 累计 deadline
+        # 定位方式：按"缩进的函数体"取（不能强制要求 -> 返回标注，
+        # UdsClient.request 没有写返回类型标注，那样的正则会直接失配）
+        mr = re.search(r"\n    def request\(self[^)]*\):\n((?:        .*\n|\n)+)", host_text)
+        rbody = mr.group(1) if mr else ""
+        has_deadline = "deadline = time.monotonic() + UDS_PENDING_TOTAL_BUDGET" in rbody
+        sub(has_deadline, "L6 UdsClient.request 内建立 0x78 累计 deadline")
+        passes_remain = "receive_message(remain)" in rbody
+        sub(passes_remain, "L6 0x78 循环传**剩余**时间 receive_message(remain) 而非完整 timeout")
+        # 反例形态：循环内重置 deadline
+        resets = re.search(r"while[^\n]*0x78[\s\S]{0,400}?deadline\s*=\s*time\.monotonic",
+                           rbody) is not None
+        sub(not resets, "L6 循环内未重置 deadline（旧形态=每次重置完整 timeout=无限挂死）")
+        ev_list += ev("ota_host.py: 0x78 累计 deadline", rbody,
+                      r"deadline\s*=\s*time\.monotonic\(\)\s*\+\s*UDS_PENDING_TOTAL_BUDGET")
+        # 预算常量必须在，且为有限正数
+        mb = re.search(r"UDS_PENDING_TOTAL_BUDGET\s*=\s*([\d.]+)", host_text)
+        sub(mb is not None and float(mb.group(1)) > 0,
+            "L6 UDS_PENDING_TOTAL_BUDGET 已定义且为正数 = %s" % (mb.group(1) if mb else "<未定义>"))
+    else:
+        ev_list.append("  [!!] ota_host.py 缺失，无法核对 M10/L6")
+        ok = False
+
+    # --- L8：main.c 试运行注释必须与"递减先于跳转"一致 ---
+    if bl_main_c:
+        # 定位到**真正的主函数体**：本文件有两个 main()（一个是被 #if 掉的样例），
+        # 直接全文比位置会拿前面的样例跳转点做比较，得到错误的先后关系。
+        mains = list(re.finditer(r"\nint\s+main\s*\(\s*void\s*\)\s*\{(.*?)\n\}",
+                                 bl_main_c, re.S))
+        mbody = mains[-1].group(1) if mains else ""
+        if not mbody:
+            ev_list.append("  [!!] 未定位到 main() 函数体，无法核对 L8")
+            ok = False
+        else:
+            # 跳转是间接层：main() 里调BL_TryBootApp()，真正跳 BL_JumpToApp 的
+            # 语句在 BL_TryBootApp() 内。要证明的命题是"递减发生在跳转**尝试**之前"，
+            # 因此比对 BL_HandleTrial() 与 BL_TryBootApp() 在 main() 内的先后。
+            dec_at = mbody.find("BL_HandleTrial")
+            jump_at = mbody.find("BL_TryBootApp")
+            order_ok = 0 <= dec_at < jump_at
+            sub(order_ok,
+                "L8 前提成立：main() 内 BL_HandleTrial() 递减在 BL_TryBootApp() 跳转之前"
+                "（dec=%d, jump=%d）" % (dec_at, jump_at))
+            ev_list += ev("main.c: 递减先于跳转", mbody,
+                          r"BL_HandleTrial\(\);[\s\S]{0,900}?BL_TryBootApp\(\)")
+
+            # 同时确认真实跳转语句确实存在于 BL_TryBootApp 内（防止结构变化后守卫空转）
+            mtb = re.search(r"static\s+void\s+BL_TryBootApp\s*\([^)]*\)\s*\{(.*?)\n\}",
+                            bl_main_c, re.S)
+            tbody_jump = mtb.group(1) if mtb else ""
+            sub("BL_JumpToApp" in tbody_jump,
+                "L8 BL_TryBootApp() 内确有 BL_JumpToApp() 调用（守卫未空转）")
+
+        # 取 BL_HandleTrial 函数体内的注释块（这里要**连注释一起看**，因为 L8 判的就是注释）
+        mt = re.search(r"static\s+void\s+BL_HandleTrial\s*\([^)]*\)\s*\{(.*?)\n\}",
+                       bl_main_c, re.S)
+        tbody = mt.group(1) if mt else ""
+        wrong = ("第 4 次" in tbody) or ("第4 次" in tbody)
+        sub(not wrong, "L8 BL_HandleTrial 注释不再声称\"第 4 次启动回滚\"（实际是第 3 次）")
+        sub("只有 2 次运行机会" in tbody or "2 次运行机会" in tbody,
+            "L8 注释已点明实际只有 2 次运行机会（left=3 不等于能跑 3 次）")
+    else:
+        ev_list.append("  [!!] main.c 缺失，无法核对 L8")
+        ok = False
+
+    return check(ok, "[C12] 边界/健壮性（缺一个校验即失效：M1 头锚点 / M2M3 越界 / M5 只读放行 / M7 空CRC / L3L4 语义 / L6 累计超时 / L8 试运行语义）",
+                 ev_list)
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     force_utf8_console()
@@ -951,6 +1198,10 @@ def main():
     bl_diag_path = os.path.join(root, "ota", "bootloader", "Core", "Src", "bl_diag.c")
     bl_jump_path = os.path.join(root, "ota", "bootloader", "Core", "Src", "bl_jump.c")
     bl_param_path = os.path.join(root, "ota", "bootloader", "Core", "Src", "bl_param.c")
+    bl_image_path = os.path.join(root, "ota", "bootloader", "Core", "Src", "bl_image.c")
+    bl_flashif_path = os.path.join(root, "ota", "bootloader", "Core", "Src", "bl_flash_if.c")
+    bl_flashif_h_path = os.path.join(root, "ota", "bootloader", "Core", "Inc", "bl_flash_if.h")
+    bl_main_c_path = os.path.join(root, "ota", "bootloader", "Core", "Src", "main.c")
 
     common_h = read_text(common_path) if os.path.isfile(common_path) else ""
     bl_main_h = read_text(bl_main_path) if os.path.isfile(bl_main_path) else ""
@@ -961,6 +1212,10 @@ def main():
     bl_diag = read_text(bl_diag_path) if os.path.isfile(bl_diag_path) else ""
     bl_jump = read_text(bl_jump_path) if os.path.isfile(bl_jump_path) else ""
     bl_param = read_text(bl_param_path) if os.path.isfile(bl_param_path) else ""
+    bl_image = read_text(bl_image_path) if os.path.isfile(bl_image_path) else ""
+    bl_flashif = read_text(bl_flashif_path) if os.path.isfile(bl_flashif_path) else ""
+    bl_flashif_h = read_text(bl_flashif_h_path) if os.path.isfile(bl_flashif_h_path) else ""
+    bl_main_c = read_text(bl_main_c_path) if os.path.isfile(bl_main_c_path) else ""
 
     bl_out, bl_results, bl_rc = "", [], 0
     if not args.skip_bl:
@@ -1000,6 +1255,8 @@ def main():
         check_c8_host_tool(root, v, host_text)
         check_c10_uds_lengths(root, v, bl_diag, agent, host_text)
         check_c11_handover_and_fc(root, v, bl_jump, bl_param, host_text)
+        check_c12_third_tier(root, v, bl_image, bl_flashif, bl_flashif_h, bl_diag,
+                             bl_param, bl_main_c, common_h, host_text)
 
     # C9 只依赖文件系统与 bl_layout.py，不依赖契约解析结果，因此放在 if v 之外
     check_c9_bl_layout(root)
