@@ -54,6 +54,7 @@ def main():
     ap.add_argument('--file', help='直接指定 hex 文件路径')
     ap.add_argument('--list', action='store_true', help='列出已连接的 ST-Link')
     ap.add_argument('--yes', action='store_true', help='跳过确认（谨慎使用）')
+    ap.add_argument('--sn', help='指定 ST-Link 序列号（多板同时在线时必填；用 --list 查）')
     ap.add_argument('--erase-all', action='store_true',
                     help='先全片擦除（默认不做；全擦会清掉 BL 与配置区）')
     args = ap.parse_args()
@@ -101,6 +102,10 @@ def main():
     #     两块板就都得重烧两个组件，极易出错。
     #   因此一律只用 -w；仅当用户显式要求 --erase-all 才全擦。
     cmd = [CLI, '-c', 'port=SWD', 'mode=UR']
+    if args.sn:
+        # 【2026-10-09】多板同时在线时必须指定 SN，否则永远连第一块。
+        # 用 --list 查 SN：板1 是 "8"，板2 是 "49FF6D068065575312232167"。
+        cmd += ['sn=%s' % args.sn]
     if args.erase_all:
         cmd += ['-e', 'all']
     cmd += ['-w', hex_path, '-v', '-rst']
@@ -109,6 +114,8 @@ def main():
     print('  ' + ' '.join('"%s"' % c if ' ' in c else c for c in cmd))
     print()
     print('  说明: -c port=SWD  mode=UR(复位后运行)')
+    if args.sn:
+        print('        sn=%-12s 指定探针（多板在线时必填）' % args.sn)
     if args.erase_all:
         print('        -e all       全片擦除（会清掉另一槽与配置区！）')
     else:

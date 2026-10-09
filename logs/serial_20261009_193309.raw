@@ -1,0 +1,34 @@
+[COM5]BL: clock HSE+PLL 150MHz OK
+[COM7]BL: clock HSE+PLL 150MHz OK
+[COM5]BL: cfg invalid, use default IDLE_A
+BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000000
+BL: after trial state=0 trial[COM5]Left=0 activeSlot=0 lastErr=0x00000000
+[COM7]BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+BL: after trial state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+[COM7]BL: clock HSE+PLL 150MHz OK
+[COM7]BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+BL: after trial state=0 trialLeft=[COM7]0 activeSlot=0 lastErr=0x00000001
+[COM5]BL: jump to APP slot 0 base=0x0800C080 size=0xCB78
+[COM5]
+=== STM32G474 CAN Node v3.0.0 | role:A(master) | Oct  5 2026 17:15:57 ===
+type 'help' for commands
+> main: led-bsrr-state M3[COM7]BL: jump to APP slot 0 base=0x0800C080 size=0xCBD0
+[COM7]
+=== STM32G474 CAN Node v3.0.0 | role:A(master) | Oct  9 2026 1[COM7]7:54:25 ===
+type 'help' for commands
+> main: led-bsrr-state M3[COM5]BL: clock HSE+PLL 150MHz OK
+[COM5]BL: cfg invalid, use default IDLE_A
+BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x0000000[COM5]0
+BL: after trial state=0 trialLeft=0 activeSlot=0 lastErr=0x00000000
+[COM7]BL: clock HSE+PLL 150MHz OK
+[COM7]BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+BL: after trial state=0 trialLeft=[COM7]0 activeSlot=0 lastErr=0x00000001
+[COM5]BL: jump to APP slot 0 base=0x08[COM5]00C080 size=0xCB78
+[COM5]
+=== STM32G474 CAN Node v3.0.0 | role:A(master) | Oct  5 2026 17:15:57 ===
+type 'help' for commands
+> main: led-bsrr-state M3[COM7]BL: jump to APP slot 0 base=0x0800C080 size=0xCBD0
+[COM7]
+=== STM32G474 CAN Node v3.0.0 | role:A(master) | Oct  9 2026 17:54:25 ===
+type 'help' for commands
+> main: led-bsrr-state M3
