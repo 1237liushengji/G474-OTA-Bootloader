@@ -170,6 +170,31 @@ static void Console_Execute(char *line)
     return;
   }
 
+  /* 【2026-10-09 真机修复】命令名统一转小写再匹配。
+   *
+   * 起因：上位机 ota_host.py 发的是**大写** `TUN ON` / `TUN OFF`
+   *（见 ota_host.py:1432 与 usage 文本），而本函数用 strcmp 严格区分大小写，
+   * 于是 `TUN ON` 匹配不到任何分支 -> 落进下面的 `unknown cmd` 都不进
+   * -> 设备**一个字节都不回**，上位机表现为"等待 TUN ON 应答超时"。
+   *
+   * 为什么归一化放在固件侧而不是改上位机：
+   *   1. 串口控制台的命令风格历史上就是小写（help/version/tun/tx...），
+   *      大写是上位机单方面的写法；固件做归一化后**两种写法都能用**，
+   *      不必再要求所有上位机/脚本/人工敲命令都改。
+   *   2. 改动只有一处（此处），比逐个调用点改更不易漏。
+   * 注意只转**命令名**，args（如 "on"）保持原样传给子命令。 */
+  {
+    char *p = cmd;
+    while ((*p != '\0') && (*p != ' '))
+    {
+      if ((*p >= 'A') && (*p <= 'Z'))
+      {
+        *p = (char)(*p - 'A' + 'a');
+      }
+      p++;
+    }
+  }
+
   if (strcmp(cmd, "help") == 0)
   {
     Console_PrintHelp();
@@ -283,6 +308,11 @@ static void Cmd_Stats(void)
   BSP_UART_Printf("dbg poll=%lu hx=%lu cmd=%lu resp=%lu (poll应=rx, cmd/resp应随帧增长)\r\n",
                   (unsigned long)g_dbgPoll, (unsigned long)g_dbgHx,
                   (unsigned long)g_dbgCmd, (unsigned long)g_dbgResp);
+  /* 【2026-10-09 真机诊断】UART 接收链路：uartRxIrq 应随 PC 键入递增。
+   * 若恒为 0 而"PC 能收到本机输出"，说明 RX 方向断（NVIC/USART/PA10 接线或复用）。
+   * 本行不依赖任何命令解析即可判断，故挂在 stats 里最省事。 */
+  BSP_UART_Printf("uartRxIrq=%lu uartRxDrop=%lu (PC键入时前者应递增)\r\n",
+                  (unsigned long)BSP_UART_RxIrqCount(), (unsigned long)BSP_UART_RxDropCount());
 }
 
 /**

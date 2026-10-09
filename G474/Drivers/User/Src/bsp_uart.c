@@ -24,6 +24,30 @@ static volatile uint16_t s_rxHead;                    /* 写指针（仅中断�
 static volatile uint16_t s_rxTail;                    /* 读指针（仅主循环修改） */
 static uint8_t  s_rxBuf;                              /* 单字节中断接收缓冲 */
 
+/* 【2026-10-09 真机诊断】接收链路诊断计数器。上位机 TUN ON 收不到应答，
+ * 而"设备能发、PC 发什么都不回"说明是**接收**方向断。二者必有一个坏：
+ *   - s_rxIrqCnt==0  -> UART 中断根本没进（NVIC/USART 未就绪，或 PA10 接线/复用有问题）
+ *   - s_rxIrqCnt>0  -> 中断在跑，问题在别处（行解析/命令匹配）
+ * 挂在 stats 命令里打印，纯诊断、不影响功能，验证完可保留。 */
+static volatile uint32_t s_rxIrqCnt;                  /* UART Rx 中断触发次数 */
+static volatile uint32_t s_rxDropCnt;                 /* 环形缓冲满被丢弃的字节数 */
+
+/**
+  * @brief  取 UART 接收中断触发次数（诊断用，见 Cmd_Stats）
+  */
+uint32_t BSP_UART_RxIrqCount(void)
+{
+  return s_rxIrqCnt;
+}
+
+/**
+  * @brief  取因环形缓冲满而被丢弃的字节数（诊断用）
+  */
+uint32_t BSP_UART_RxDropCount(void)
+{
+  return s_rxDropCnt;
+}
+
 /**
   * @brief  初始化控制台串口：时钟、GPIO复用、USART1、中断、启动接收
   */
@@ -146,7 +170,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       s_rxRing[s_rxHead] = s_rxBuf;
       s_rxHead           = next;
     }
+    else
+    {
+      s_rxDropCnt++;                                 /* 缓冲满，丢弃 */
+    }
     /* 缓冲满则丢弃本字节（控制台场景可接受，键入方会看到无回显） */
+    s_rxIrqCnt++;
 
     (void)HAL_UART_Receive_IT(huart, &s_rxBuf, 1U);   /* 继续接收 */
   }

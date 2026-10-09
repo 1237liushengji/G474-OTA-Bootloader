@@ -38,7 +38,7 @@
 #define CAN_NODE_A                     0
 #define CAN_NODE_B                     1
 
-#define CAN_NODE_ROLE                  CAN_NODE_B    /* <-- 当前编译的节点角色 */
+#define CAN_NODE_ROLE                  CAN_NODE_A    /* <-- 当前编译的节点角色 */
 
 /* 单板自测试（硬件排错用）：置1后FDCAN进入外部回环模式——本板发出的帧会被
  * 自己收到（0x321按从节点逻辑应答，0x322按主节点逻辑处理），单板即可完成

@@ -34,5 +34,9 @@ void     BSP_UART_Send(const char *data, uint16_t len);
 void     BSP_UART_Printf(const char *fmt, ...);
 uint16_t BSP_UART_Available(void);
 int16_t  BSP_UART_GetChar(void);
+/* 【2026-10-09 真机诊断】接收链路计数：前者应随 PC 键入递增。
+ * 恒为 0 而"PC 能收到本机输出" => RX 方向断（NVIC/USART/PA10 接线或复用）。 */
+uint32_t BSP_UART_RxIrqCount(void);
+uint32_t BSP_UART_RxDropCount(void);
 
 #endif /* __BSP_UART_H */
