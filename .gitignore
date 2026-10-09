@@ -30,6 +30,10 @@ G474/MDK-ARM/G474/G474.hex
 *.sct
 *.scvd
 
+# Keil 命令行编译日志（UV4 -o 输出的临时日志，可重新生成）
+build_log.txt
+*_build_log.txt
+
 # Python
 __pycache__/
 *.pyc

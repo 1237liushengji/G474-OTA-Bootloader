@@ -68,16 +68,26 @@ def main():
     if miss:
         print('!! 契约常量缺失: %s' % miss); return 2
 
-    exp_bl = c['OTA_FLASH_BASE']                      # BL 向量表必须 0x08000000
-    exp_app = c['OTA_SLOT_A_ADDR'] + c['OTA_IMG_HDR_SIZE']
-    exp_bl_limit = c['OTA_BL_CODE_ADDR'] + c['OTA_BL_CODE_SIZE']
-    exp_slot_limit = c['OTA_SLOT_A_ADDR'] + c['OTA_SLOT_SIZE']
+    # 【2026-10-09】支持 --slot：APP 工程的链接基址随槽位变化（Slot A=0x0800C080、
+    # Slot B=0x08040880），而 .map 反映的是**最后一次编译**的那个槽。
+    # 原实现硬编码期望 Slot A，于是刚编完 Slot B 后会误报"向量表不符"。
+    slot = 'A'
+    if '--slot' in sys.argv:
+        i = sys.argv.index('--slot')
+        if i + 1 < len(sys.argv):
+            slot = sys.argv[i + 1].upper()
 
-    print('=== 契约期望 ===')
+    exp_bl = c['OTA_FLASH_BASE']                      # BL 向量表必须 0x08000000
+    slot_base = c['OTA_SLOT_A_ADDR'] if slot == 'A' else c['OTA_SLOT_B_ADDR']
+    exp_app = slot_base + c['OTA_IMG_HDR_SIZE']
+    exp_bl_limit = c['OTA_BL_CODE_ADDR'] + c['OTA_BL_CODE_SIZE']
+    exp_slot_limit = slot_base + c['OTA_SLOT_SIZE']
+
+    print('=== 契约期望（APP 槽位 = Slot %s）===' % slot)
     print('  BL 向量表      : 0x%08X' % exp_bl)
     print('  BL 区上界      : 0x%08X  (代码必须落在此前)' % exp_bl_limit)
     print('  APP 向量表     : 0x%08X' % exp_app)
-    print('  Slot A 上界    : 0x%08X' % exp_slot_limit)
+    print('  Slot %s 上界    : 0x%08X' % (slot, exp_slot_limit))
     print()
 
     bad = 0
@@ -86,7 +96,7 @@ def main():
     # 若都不一致，再退化为按 mtime 取最新，从而能报出"地址错"而不是"找不到"。
     for label, mapname, exp_vec, limit, base in (
             ('BL ', 'BL.map', exp_bl, exp_bl_limit, c['OTA_FLASH_BASE']),
-            ('APP', 'G474.map', exp_app, exp_slot_limit, c['OTA_SLOT_A_ADDR'])):
+            ('APP', 'G474.map', exp_app, exp_slot_limit, slot_base)):
         cands = find_map(mapname)
         if not cands:
             print('[%s] !! 未找到 %s（是否还没构建？）' % (label, mapname)); bad += 1; continue
@@ -101,7 +111,7 @@ def main():
         vec, vend, ro, rw = read_vectors(m)
         ok_addr = (vec is not None) and (int(vec, 16) == exp_vec)
         flash_use = (ro or 0) + (rw or 0)
-        ok_size = flash_use <= (limit - (c['OTA_FLASH_BASE'] if label == 'BL ' else c['OTA_SLOT_A_ADDR']))
+        ok_size = flash_use <= (limit - (c['OTA_FLASH_BASE'] if label == 'BL ' else slot_base))
         print('[%s] %s' % (label, m.replace(ROOT + os.sep, '')))
         print('      向量表 = %s   期望 0x%08X   %s' % (vec, exp_vec, 'OK' if ok_addr else '!! 不符'))
         print('      RO=%s RW=%s  占用 %d 字节  上界余量 %d 字节  %s'

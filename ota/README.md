@@ -405,7 +405,31 @@ H2 的后果不是"少一份冗余"，而是**双副本机制名存实亡** —�
 否则"由 `sp < X` 改为 `sp <= X`"这类修复说明会把自己判成缺陷。
 （C12 上线时正是这个原因误报 4 项，是本轮踩到的第三个"守卫自身缺陷"类型。）
 
-### 仍未验证（重要）
+### 真编译验证（2026-10-09）
 
-本机**没有 ARM 编译器**（`arm-none-eabi-gcc` / `gcc` 均不可用），本轮 C 代码改动
-只做了括号平衡粗检，**未真编译**。上板前必须用 Keil 重编 BL 与 APP 确认 0 Error。
+三梯队 C 改动已用 Keil（`D:\U5\UV4\UV4.exe`，ARMCC V6.14）**真正编译过**：
+
+```
+BL.uvprojx    0 Error, 0 Warning   Code=30240  →  firmware/BL.hex
+G474.uvprojx  0 Error, 0 Warning（Slot A / Slot B 各编一次，基址不同）
+build_all_firmware.py  一键产出 8 个固件，全部 0 Error 0 Warning
+verify_layout.py --slot A|B   链接地址/体积与分区表一致
+```
+
+一键构建：
+
+```bash
+python ota/scripts/build_all_firmware.py
+```
+
+它会自动为「角色 A / 角色 B」分别切到 Slot A / Slot B 的链接基址（IROM + OCR_RVCT4 +
+VECT_TAB_OFFSET 三处必须一致，Keil 每次构建都会依 OCR_RVCT4 重生成 `.sct`），
+编完自动还原为 Slot A 并重编，使 `.map` 与工程配置保持一致。
+
+### ⚠️ 仍未验证
+
+**真机 OTA 全流程至今从未跑过。** 固件已就绪（8 个 hex/bin 全部是 10-09 产出），
+静态守卫与真编译全绿，但**没有上过板**——这是现在唯一的拦路虎。
+
+另有一条已知的硬件级残余风险（M13）：擦 PRIMARY 控制页期间掉电会变砖（只能 SWD 救），
+详见 [`docs/04-AB双槽与回滚机制.md`](docs/04-AB双槽与回滚机制.md) 第 5.1 节。

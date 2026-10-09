@@ -90,11 +90,27 @@ def main():
         return 0
 
     # ---- 3) APP 两个角色 ----
+    # 【2026-10-09 修复】原实现只切CAN 角色，**不切链接基址**，导致
+    # G474_B.hex 与 G474_A.hex 链接地址完全相同（都是 0x0800C080）——
+    # 名为"B 板固件"实际仍跑在 Slot A。make_factory_image.py --slot B
+    # 会正确拒绝它（"预期 0x08040880，实际 0x0800C080"）。
+    # 现在两个角色各自绑定自己的槽位：角色 A -> Slot A，角色 B -> Slot B。
     orig_can = open(CAN_H, encoding='utf-8', errors='replace').read()
     try:
-        for role, outname in (('CAN_NODE_A', 'G474_A.hex'),
-                              ('CAN_NODE_B', 'G474_B.hex')):
-            print('[3] APP  角色 = %s' % role)
+        for role, slot, outname in (('CAN_NODE_A', 'A', 'G474_A.hex'),
+                                    ('CAN_NODE_B', 'B', 'G474_B.hex')):
+            print('[3] APP  角色 = %s  槽位 = Slot %s' % (role, slot))
+
+            # 3a) 先切链接基址（IROM + OCR_RVCT4 + VECT_TAB_OFFSET 三处必须一致）
+            r = subprocess.run([sys.executable, os.path.join(ROOT, 'ota', 'scripts', 'fix_app_irom.py'),
+                                '--slot', slot, '--apply'],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print('    !! 切换到 Slot %s 失败（fix_app_irom.py 退出码 %d）' % (slot, r.returncode))
+                print('    ' + (r.stdout or r.stderr).strip().replace('\n', '\n    '))
+                continue
+
+            # 3b) 再切 CAN 角色
             cur = open(CAN_H, encoding='utf-8', errors='replace').read()
             new, nsub = re.subn(r'(#define CAN_NODE_ROLE\s+)CAN_NODE_[AB]',
                                 r'\g<1>' + role, cur, count=1)
@@ -108,8 +124,16 @@ def main():
                 emit(APP_HEX, os.path.join(OUT, outname))
     finally:
         open(CAN_H, 'w', encoding='utf-8', newline='').write(orig_can)
+        # 链接基址也必须还原为 Slot A，否则下次打开工程时基址是 B 的
+        subprocess.run([sys.executable, os.path.join(ROOT, 'ota', 'scripts', 'fix_app_irom.py'),
+                        '--slot', 'A', '--apply'], capture_output=True, text=True)
+        # 必须**重编一次**：工程配置已还原成Slot A，但 G474.map 仍停留在最后一次
+        # 编译（Slot B）的结果。不重编的话，verify_layout.py --slot A 会报
+        # "向量表 0x08040880 期望 0x0800C080"，而实际上 Slot A 固件早已正确产出。
+        e, w, s, _ = build(APP_PROJ, os.path.join(os.environ.get('TEMP', '.'), 'fw_app.log'))
         print()
-        print('  can.h 已还原为原始角色设置')
+        print('  can.h 与 APP 链接基址已还原为 Slot A（并重编以同步 %s）' % os.path.basename(APP_HEX))
+        print('  重编: %d Error, %d Warning   %s' % (e, w, s))
 
     print()
     print('到位固件清单（%s/）：' % os.path.relpath(OUT, ROOT))

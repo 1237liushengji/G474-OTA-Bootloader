@@ -99,17 +99,6 @@
 #define OTA_IMG_HDR_SEARCH_N      1U
 #define OTA_IMG_HDR_SEARCH_STEP   0x00000100U
 
-/* 血线 11 守卫：搜索范围绝不能伸进净荷区。
- * OTA_IMG_HDR_SIZE 是 0x80，而 STEP 是 0x100 —— 只要 N >= 2，第二次搜索就必然
- * 落在 [slotBase+0x80, slotBase+0x100) 这段净荷里。这里锁死，任何人调大 N 都会
- * 在编译期被拦下，而不是等到"某个镜像的净荷里碰巧有 G4OT"才现场暴露。 */
-#if (OTA_IMG_HDR_SEARCH_N > 1U)
-#error "OTA_IMG_HDR_SEARCH_N 必须为 1：镜像头恒在槽首 slotBase+0，搜索第2 个位置会伸进净荷区（见血线 11）"
-#endif
-#if ((OTA_IMG_HDR_SEARCH_N * OTA_IMG_HDR_SEARCH_STEP) > OTA_IMG_HDR_SIZE)
-#error "镜像头搜索范围绝不能超过 OTA_IMG_HDR_SIZE，否则会搜进净荷区"
-#endif
-
 /*===================================== 镜像头格式 ========================================*/
 /* 上位机在 MDK 生成的 .bin 前拼接 32 字节的头**结构体**（OTA_IMG_HDR_STRUCT_SIZE），
  * 槽首保留区则是 0x80（OTA_IMG_HDR_SIZE，含[32,0x80) 填充），地址字段填"槽内绝对地址"。
@@ -137,6 +126,25 @@
 #define OTA_IMG_MAGIC             0x47344F54U   /* "G4OT"（小端字节序列 47 34 4F 54） */
 #define OTA_IMG_HDR_SIZE          0x00000080U   /* 槽首保留区 = 头 + 填充，**必须 0x80 对齐** */
 #define OTA_IMG_HDR_STRUCT_SIZE   32U           /* 头结构体实际占用（magic..hdrCrc+reserved） */
+
+/* 血线 11 守卫：搜索范围绝不能伸进净荷区。
+ * STEP 是 0x100 > HDR_SIZE(0x80) —— 只要 N >= 2，第二次搜索就必然落在
+ * [slotBase+0x80, slotBase+0x100) 这段净荷里。这里锁死，任何人调大 N 都会在编译期
+ * 被拦下，而不是等到"某个镜像的净荷里碰巧有 G4OT"才现场暴露。
+ *
+ * ⚠️ 两条踩过的坑（2026-10-09 首次真编译才暴露，静态守卫完全测不到）：
+ *  1) 判定必须用 **(N-1)*STEP** 而非 N*STEP：搜索是 for (i=0; i<N; i++) 查
+ *     slotBase + i*STEP，i 从 0 起，N=1 时唯一位置是 slotBase+0（就在头内、不越界）。
+ *     写成 N*STEP 会算得 0x100 > 0x80 而误报，把 11 个 .c 全部编译不下去。
+ *  2) 本守卫**必须**放在 OTA_IMG_HDR_SIZE 定义之后。写在它前面时该宏尚未定义，
+ *     预处理器把 OTA_IMG_HDR_SIZE 当普通标识符，同样导致全量编译失败。
+ */
+#if (OTA_IMG_HDR_SEARCH_N > 1U)
+#error "OTA_IMG_HDR_SEARCH_N 必须为 1：镜像头恒在槽首 slotBase+0，搜索第2 个位置会伸进净荷区（见血线 11）"
+#endif
+#if (((OTA_IMG_HDR_SEARCH_N - 1U) * OTA_IMG_HDR_SEARCH_STEP) >= OTA_IMG_HDR_SIZE)
+#error "镜像头最后一个搜索位置已越出 OTA_IMG_HDR_SIZE(0x80)，会搜进净荷区"
+#endif
 
 /* 镜像头字段偏移（全部小端） */
 #define OTA_IMG_OFF_MAGIC         0U    /* u32 魔数 */
