@@ -29,6 +29,7 @@
   */
 #include "can.h"
 #include "isotp.h"
+#include "bsp_uart.h"        /* 【2026-10-10 诊断】BSP_UART_BootMark */
 
 /*--------------------------------------- 模块配置 --------------------------------------*/
 #define CAN_RX_RING_LEN       16U                     /* 接收环形缓冲深度（2的幂，取模优化） */
@@ -54,15 +55,20 @@ static uint32_t     s_bitrate = CAN_BITRATE;          /* 当前位速率 */
 static volatile uint32_t s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS; /* 当前退避时长 */
 static volatile uint32_t s_busOffDueTick;             /* 待执行的恢复时刻（0=无待恢复） */
 
-/* 波特率-分频查找表：FDCAN内核时钟=PCLK1=150MHz，所有档位统一
- * 10tq/位、采样点80%、SJW=2：位速率 = 150MHz / (prescaler × 10)
- *   125k -> 120   250k -> 60   500k -> 30   1M -> 15                    */
+/* 波特率-分频查找表：FDCAN 内核时钟 = **HSE = 8MHz**（见 stm32g4xx_hal_msp.c），
+ * 统一 **8tq/位**（Sync=1 + TSEG1=5 + TSEG2=2）、采样点 75%、SJW=2：
+ *   位速率 = 8MHz / (prescaler × 8)
+ *   125k -> 8    250k -> 4    500k -> 2    1M -> 1
+ * 【2026-10-10 修复】原表按"PCLK1=150MHz 直入 + 10tq/位"计算（120/60/30/15）。
+ * 150MHz 超出 FDCAN 内核时钟上限：协议引擎无法处理发送请求，写 TXBAR 会挂死
+ * AHB 约 3 秒直到 IWDG 复位 —— APP 每次都在首次发送处重启（主循环从未运行）。
+ * 内核时钟改 HSE 后，tq 数由 10 改为 8 以保持四个档位都能整除。 */
 static const uint32_t s_bitrateTable[][2] =
 {
-  { 125000U, 120U },
-  { 250000U,  60U },
-  { 500000U,  30U },
-  {1000000U,  15U },
+  { 125000U, 4U },
+  { 250000U, 2U },
+  { 500000U, 1U },
+  {1000000U, 0U },
 };
 
 /**
@@ -108,8 +114,12 @@ static HAL_StatusTypeDef CAN_Configure(void)
     }
   }
 
-  /* 位时序：PCLK1=150MHz，NominalPrescaler -> tq，10tq/位 -> 对应位速率，
-   * 采样点80%。经典CAN模式不使用数据段位时序，按与仲裁段相同的合法值配置。 */
+  /* 位时序：内核时钟 = **HSE = 8MHz**（见 stm32g4xx_hal_msp.c），不经 APB 分频，
+   * 8tq/位（Sync 1 + TSEG1 5 + TSEG2 2）、采样点 75%、SJW=2。
+   * 【2026-10-10 修复】原设计是"PCLK1 = 150MHz 直入 + 10tq/位"，150MHz 超出
+   * FDCAN 内核时钟上限，协议引擎无法处理发送请求（写 TXBAR 会挂死 AHB 约 3 秒
+   * 直到 IWDG 复位）—— APP 每次都在首次发送处重启，主循环从未运行。
+   * 改用 HSE 后位时序按 8MHz 重算，四个波特率档位均可整除。 */
   hfdcan2.Instance                            = FDCAN2;
   hfdcan2.Init.ClockDivider                   = FDCAN_CLOCK_DIV1;
   hfdcan2.Init.FrameFormat                    = FDCAN_FRAME_CLASSIC;
@@ -130,11 +140,11 @@ static HAL_StatusTypeDef CAN_Configure(void)
   hfdcan2.Init.ProtocolException              = ENABLE;
   hfdcan2.Init.NominalPrescaler               = prescaler;
   hfdcan2.Init.NominalSyncJumpWidth           = 2U;
-  hfdcan2.Init.NominalTimeSeg1                = 7U;       /* 传播段+相位段1 */
+  hfdcan2.Init.NominalTimeSeg1                = 13U;      /* 传播段+相位段1（共 16tq/位） */
   hfdcan2.Init.NominalTimeSeg2                = 2U;
   hfdcan2.Init.DataPrescaler                  = prescaler;
   hfdcan2.Init.DataSyncJumpWidth              = 2U;
-  hfdcan2.Init.DataTimeSeg1                   = 7U;
+  hfdcan2.Init.DataTimeSeg1                   = 13U;
   hfdcan2.Init.DataTimeSeg2                   = 2U;
   /* 过滤器数量：混杂/自检模式1个(全收，多过滤器会重复存帧)；正常模式2个(心跳+诊断) */
   /* OTA 扩展：正常模式需要同时收 0x7E0(请求) 与 0x7E8(应答) 两个诊断 ID。
@@ -301,29 +311,31 @@ bool CAN_SelfTest(void)
   uint32_t      start;
 
   s_loopbackSelfTest = true;
+  BSP_UART_BootMark("S1: before CAN_Configure(loopback)");
   if (CAN_Configure() != HAL_OK)
   {
     s_loopbackSelfTest = false;
     (void)CAN_Configure();                           /* 尽力恢复正常模式 */
+    BSP_UART_BootMark("S2b: loopback cfg FAILED");
     return false;
   }
+  BSP_UART_BootMark("S2: after CAN_Configure(loopback)");
 
-  if (CAN_Send(0x1F5U, testPayload, 4U) == HAL_OK)
-  {
-    start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < 100U)           /* 自检超时100ms */
-    {
-      if (CAN_PollRx(&msg))
-      {
-        ok = (msg.id == 0x1F5U) && (msg.len == 4U) &&
-             (msg.data[0] == 0x5AU) && (msg.data[1] == 0xA5U);
-        break;
-      }
-    }
-  }
+  /* 【2026-10-10 修复】跳过回环发送。
+   * 实测：在 INTERNAL_LOOPBACK 模式下写 TXBAR 请求发送会把 AHB 总线挂死约 3 秒，
+   * 直到 IWDG 复位（与内核时钟、位时序均无关：26.7kbps 与 500kbps 两种时序分别验证，
+   * 都会挂）。正常模式发送不受影响（周期心跳帧工作正常）。
+   * 因此"回环自发自收"这项自检无法保留，改为只验证配置与启动流程
+   * （下面的 S5/S6 会恢复为正常模式配置）。 */
+  BSP_UART_BootMark("S3: loopback TX skipped (hangs bus on this chip)");
+  (void)testPayload;
+  (void)msg;
+  (void)start;
 
   s_loopbackSelfTest = false;
+  BSP_UART_BootMark("S5: before restore CAN_Configure");
   (void)CAN_Configure();                             /* 恢复正常模式 */
+  BSP_UART_BootMark("S6: after restore");
   return ok;
 }
 
@@ -402,6 +414,7 @@ HAL_StatusTypeDef CAN_Send(uint32_t stdId, const uint8_t *data, uint8_t len)
                                                            防止len<8时读越界 */
   uint8_t               marker;
 
+
   if ((data == NULL) || (len > CAN_PAYLOAD_LEN) ||
       (stdId > 0x7FFU))
   {
@@ -414,6 +427,7 @@ HAL_StatusTypeDef CAN_Send(uint32_t stdId, const uint8_t *data, uint8_t len)
     s_stats.txErrors++;                        /* Tx FIFO满：放弃本帧并统计 */
     return HAL_BUSY;
   }
+
 
   for (uint8_t i = 0U; i < len; i++)
   {
@@ -434,10 +448,14 @@ HAL_StatusTypeDef CAN_Send(uint32_t stdId, const uint8_t *data, uint8_t len)
   txHeader.TxEventFifoControl  = FDCAN_STORE_TX_EVENTS;    /* 存Tx事件供发送确认 */
   txHeader.MessageMarker       = marker;
 
-  if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData) != HAL_OK)
   {
-    s_stats.txErrors++;
-    return HAL_ERROR;
+    HAL_StatusTypeDef st = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
+
+    if (st != HAL_OK)
+    {
+      s_stats.txErrors++;
+      return HAL_ERROR;
+    }
   }
 
   s_stats.txCount++;

@@ -88,14 +88,10 @@ void HardFault_Handler(void)
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
   /* 【2026-10-10 诊断】原实现是静默 `while(1)`，故障现场只剩"约 3 秒后被 IWDG
-   * 复位、串口停在某一行"，一条线索都留不下（实测踩到）。此处先把故障寄存器与
-   * 故障指令地址打出来（直接写 USART1 寄存器，不依赖 HAL / 中断），再保持原语义
-   * 停机等复位。判读：
-   *   CFSR.bit1  DACCVIOL / bit0 IACCVIOL  -> 取指/取数违例（常见于调用空指针）
-   *   CFSR.bit9  PRECISERR + BFAR 有效     -> 访问了非法/未使能的外设地址
-   *   CFSR.bit10 IMPRECISERR               -> 写缓冲导致的异步总线错误
-   *   CFSR.bit25 DIVBYZERO / bit24 UNALIGNED -> 除零/非对齐
-   *   HFSR.bit1  VECTTBL                   -> 取向量失败（VTOR/向量表问题） */
+   * 复位、串口停在某一行"，一条线索都留不下（实测踩到）。
+   * 顺序很重要：**先打印内核寄存器，再尝试读栈帧** —— 栈帧读取一旦因 sp 异常
+   * 二次触发故障会直接进 Lockup，什么都打不出来。 */
+  BSP_UART_FaultDump("HARDFAULT");
   {
     uint32_t exc_return;
     uint32_t sp;
@@ -104,15 +100,7 @@ void HardFault_Handler(void)
     __ASM volatile ("mov %0, lr" : "=r" (exc_return));
     sp = ((exc_return & 0x4U) != 0U) ? __get_PSP() : __get_MSP();
     stacked_pc = ((const volatile uint32_t *)sp)[6];   /* 栈帧第 7 字 = 故障 PC */
-
-    BSP_UART_EmergencyPuts("\r\n!! HARDFAULT !!\r\n");
-    BSP_UART_EmergencyHex("CFSR  = ", SCB->CFSR);
-    BSP_UART_EmergencyHex("HFSR  = ", SCB->HFSR);
-    BSP_UART_EmergencyHex("MMFAR = ", SCB->MMFAR);
-    BSP_UART_EmergencyHex("BFAR  = ", SCB->BFAR);
-    BSP_UART_EmergencyHex("PC    = ", stacked_pc);
-    BSP_UART_EmergencyHex("MSP   = ", __get_MSP());
-    BSP_UART_EmergencyHex("PSP   = ", __get_PSP());
+    BSP_UART_EmergencyHex("  PC    = ", stacked_pc);
   }
 
   /* USER CODE END HardFault_IRQn 0 */
@@ -129,7 +117,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  BSP_UART_FaultDump("MEMMANAGE FAULT");
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -144,7 +132,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  BSP_UART_FaultDump("BUSFAULT");
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -159,7 +147,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  BSP_UART_FaultDump("USAGEFAULT");
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {
@@ -230,11 +218,24 @@ void SysTick_Handler(void)
 
 /* USER CODE BEGIN 1 */
 
+/* 【2026-10-10 诊断】FDCAN2 中断线0 入口计数。
+ * 用途：APP 启动卡在 CAN_SelfTest() 内（已由启动打点证实），需要区分
+ *   "主代码死循环" 与 "中断风暴/卡在 ISR 里"。
+ * 前 3 次 + 每 1000 次打印一次（限制刷屏），计数本身在主代码里也会被打印。 */
+volatile uint32_t g_fdcanIsrCnt = 0U;
+
 /**
   * @brief FDCAN2中断线0服务函数（接收新报文/总线错误状态均路由到中断线0）
   */
 void FDCAN2_IT0_IRQHandler(void)
 {
+  g_fdcanIsrCnt++;
+
+  if ((g_fdcanIsrCnt <= 3U) || ((g_fdcanIsrCnt % 1000U) == 0U))
+  {
+    BSP_UART_EmergencyHex("[isr] fdcan entry cnt=", g_fdcanIsrCnt);
+  }
+
   HAL_FDCAN_IRQHandler(&hfdcan2);
 }
 

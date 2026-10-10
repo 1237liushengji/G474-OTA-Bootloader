@@ -1,0 +1,28 @@
+
+=== RESET @ 2026-10-10T16:46:23.202 ===
+CMD: D:\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe -c port=SWD mode=normal -rst
+      -------------------------------------------------------------------
+                       STM32CubeProgrammer v2.23.0                  
+      -------------------------------------------------------------------
+
+ST-LINK SN  : 8
+ST-LINK FW  : V2J35S7
+Board       : --
+Voltage     : 3.27V
+SWD freq    : 4000 KHz
+Connect mode: Normal
+Reset mode  : Software reset
+Device ID   : 0x469
+Revision ID : Rev X
+Device name : STM32G47x/G48x/G414
+NVM size    : 512 KBytes
+Device type : MCU
+Device CPU  : Cortex-M4
+BL Version  : 0xD5
+Debug in Low Power mode enabled
+
+
+MCU Reset
+
+Software reset is performed
+RETURNCODE: 0

@@ -1,0 +1,148 @@
+监听 : COM7 @ 115200
+时长 : 8.0s   复位: 1 次   掉线自动重连: 开
+落盘 : D:\WorkBuddy Data\Claw\OTA_Bootloader\logs\serial_20261010_161354.{log,raw,reset}
+------------------------------------------------------------------------
+[16:13:54.916] COM7  +  0.14s | BL: clock HSE+PLL 150MHz OK
+[16:13:54.957] COM7  +  0.18s | BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+[16:13:54.957] COM7  +  0.18s | BL: after trial state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+[16:13:55.273] --- reset 1/1 ---
+[16:13:55.652] COM7  +  0.88s | BL: clock HSE+PLL 150MHz OK
+[16:13:55.693] COM7  +  0.92s | BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+[16:13:55.694] COM7  +  0.92s | BL: after trial state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+[16:13:56.800] COM7  +  2.03s | BL: jump to APP slot 0 base=0x0800C080 size=0xDFD0
+[16:13:56.985] COM7  +  2.21s | === STM32G474 CAN Node v3.0.0 | role:A(master) | Oct 10 2026 16:12:37 ===
+[16:13:56.993] COM7  +  2.22s | type 'help' for commands
+[16:13:56.993] COM7  +  2.22s | > main: led-bsrr-state M3
+[16:13:56.993] COM7  +  2.22s | [boot] A: tick alive check tick=0x0000029B
+[16:13:57.035] COM7  +  2.26s | [boot] tick0=671 tick1=708 delta=37 (>0 => SysTick 在走)
+[16:13:57.035] COM7  +  2.26s | [boot] B: before CAN_Init tick=0x000002CA
+[16:13:57.055] COM7  +  2.28s | [layout] want TXBC=0300009E
+[16:13:57.055] COM7  +  2.28s | [layout] read RXF0C=00000000
+[16:13:57.055] COM7  +  2.28s | [layout] read RXF1C=00000000
+[16:13:57.055] COM7  +  2.28s | [layout] read TXBC =00000000
+[16:13:57.055] COM7  +  2.28s | [layout] read TXEFC=00000000
+[16:13:57.055] COM7  +  2.28s | [layout] CCCR      =00000003
+[16:13:57.055] COM7  +  2.28s | [layout] TXFQS     =00000000
+[16:13:57.055] COM7  +  2.28s | [scan] blkBase=40006800
+[16:13:57.055] COM7  +  2.28s | [scan]00030028
+[16:13:57.076] COM7  +  2.30s | [scan]1FFFFFFF
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.077] COM7  +  2.30s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [scan]00000003
+[16:13:57.098] COM7  +  2.33s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [scan]00000000
+[16:13:57.098] COM7  +  2.33s | [boot] C: after CAN_Init tick=0x00000304
+[16:13:57.098] COM7  +  2.33s | [boot] D: before CAN_SelfTest tick=0x00000308
+[16:13:57.119] COM7  +  2.35s | [boot] S1: before CAN_Configure(loopback) tick=0x0000030C
+[16:13:57.119] COM7  +  2.35s | [layout] want TXBC=0300009E
+[16:13:57.119] COM7  +  2.35s | [layout] read RXF0C=00000000
+[16:13:57.119] COM7  +  2.35s | [layout] read RXF1C=00000000
+[16:13:57.119] COM7  +  2.35s | [layout] read TXBC =00000000
+[16:13:57.119] COM7  +  2.35s | [layout] read TXEFC=00000000
+[16:13:57.119] COM7  +  2.35s | [layout] CCCR      =000000A3
+[16:13:57.140] COM7  +  2.37s | [layout] TXFQS     =00000000
+[16:13:57.140] COM7  +  2.37s | [scan] blkBase=40006800
+[16:13:57.140] COM7  +  2.37s | [scan]00010028
+[16:13:57.140] COM7  +  2.37s | [scan]1FFFFFFF
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.140] COM7  +  2.37s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000003
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.161] COM7  +  2.39s | [scan]00000000
+[16:13:57.162] COM7  +  2.39s | [scan]00000000
+[16:13:57.162] COM7  +  2.39s | [scan]00000000
+[16:13:57.182] COM7  +  2.41s | [boot] S2: after CAN_Configure(loopback) tick=0x00000348
+[16:13:57.182] COM7  +  2.41s | [boot] T1: CAN_Send enter tick=0x0000034D
+[16:13:57.182] COM7  +  2.41s | [boot] S3b: CAN_Send FAILED tick=0x00000351
+[16:13:57.182] COM7  +  2.41s | [boot] S5: before restore CAN_Configure tick=0x00000355
+[16:13:57.182] COM7  +  2.41s | [layout] want TXBC=0300009E
+[16:13:57.182] COM7  +  2.41s | [layout] read RXF0C=00000000
+[16:13:57.182] COM7  +  2.41s | [layout] read RXF1C=00000000
+[16:13:57.203] COM7  +  2.43s | [layout] read TXBC =00000000
+[16:13:57.203] COM7  +  2.43s | [layout] read TXEFC=00000000
+[16:13:57.203] COM7  +  2.43s | [layout] CCCR      =00000003
+[16:13:57.204] COM7  +  2.43s | [layout] TXFQS     =00000000
+[16:13:57.204] COM7  +  2.43s | [scan] blkBase=40006800
+[16:13:57.204] COM7  +  2.43s | [scan]00030000
+[16:13:57.204] COM7  +  2.43s | [scan]1FFFFFFF
+[16:13:57.204] COM7  +  2.43s | [scan]00000000
+[16:13:57.204] COM7  +  2.43s | [scan]00000000
+[16:13:57.204] COM7  +  2.43s | [scan]00000000
+[16:13:57.204] COM7  +  2.43s | [scan]00000000
+[16:13:57.204] COM7  +  2.43s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000003
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.225] COM7  +  2.45s | [scan]00000000
+[16:13:57.246] COM7  +  2.47s | [scan]00000000
+[16:13:57.246] COM7  +  2.47s | [scan]00000000
+[16:13:57.246] COM7  +  2.47s | [scan]00000000
+[16:13:57.246] COM7  +  2.47s | [scan]00000000
+[16:13:57.246] COM7  +  2.47s | [boot] S6: after restore tick=0x00000391
+[16:13:57.246] COM7  +  2.47s | [boot] E: after CAN_SelfTest tick=0x00000395
+[16:13:57.246] COM7  +  2.47s | CAN self-test: FAIL
+[16:13:57.246] COM7  +  2.47s | [boot] F: before Uds/OtaTunnel/Ota init tick=0x0000039A
+[16:13:57.246] COM7  +  2.47s | ota: slot 0 state 0
+[16:13:57.267] COM7  +  2.49s | [boot] G: after Uds/OtaTunnel/Ota init tick=0x000003A1
+[16:13:57.267] COM7  +  2.49s | [boot] H: before LCD/IWDG block tick=0x000003A6
+[16:13:57.573] COM7  +  2.80s | [uart] CR1=002D CR3=0001 BRR=0516 ISR=006000D0
+[16:13:57.573] COM7  +  2.80s | [uart] MODER=ABEBFFFF IDR=A600 PA10=1 edges/20ms=0
+[16:13:57.573] COM7  +  2.80s | [uart] ISER1=00000020 rxIrq=0 drop=0 head=0 tail=0
+[16:13:57.573] COM7  +  2.80s | [uart] gState=32 RxState=34 RxCnt=1
+[16:13:58.554] COM7  +  3.78s | [boot] T1: CAN_Send enter tick=0x000008AD
+[16:13:59.557] COM7  +  4.79s | [boot] T1: CAN_Send enter tick=0x00000C95
+[16:14:00.560] COM7  +  5.79s | [boot] T1: CAN_Send enter tick=0x0000107D
+[16:14:00.581] COM7  +  5.81s | [uart] CR1=002D CR3=0001 BRR=0516 ISR=006000D0
+[16:14:00.581] COM7  +  5.81s | [uart] MODER=ABEBFFFF IDR=A600 PA10=1 edges/20ms=0
+[16:14:00.581] COM7  +  5.81s | [uart] ISER1=00000020 rxIrq=0 drop=0 head=0 tail=0
+[16:14:00.581] COM7  +  5.81s | [uart] gState=32 RxState=34 RxCnt=1
+[16:14:01.543] COM7  +  6.77s | [boot] T1: CAN_Send enter tick=0x00001465
+[16:14:02.548] COM7  +  7.78s | [boot] T1: CAN_Send enter tick=0x0000184D
+------------------------------------------------------------------------
+统计 : COM7  收到 139 行 / 3786 字节，掉线 0 次
+复位 : [0]
+日志 : D:\WorkBuddy Data\Claw\OTA_Bootloader\logs\serial_20261010_161354.log

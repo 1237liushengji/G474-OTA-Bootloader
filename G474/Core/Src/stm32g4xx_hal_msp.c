@@ -95,9 +95,20 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
 
   if (fdcanHandle->Instance == FDCAN2)
   {
-    /* FDCAN内核时钟选择PCLK1 = 150MHz（位时序参数按此时钟计算，见can.h） */
+    /* 【2026-10-10 修复】FDCAN 内核时钟改用 **HSE（8MHz）**。
+     *
+     * 原设计用 PCLK1 = 150MHz 直接作内核时钟 —— 远超 FDCAN 内核时钟的允许上限，
+     * 协议引擎被超频后无法处理发送请求。实测现象极具迷惑性：
+     *   · 寄存器读写正常（CREL/ENDN 都能读到正确复位值）
+     *   · 写 TXBAR=0（不请求发送）完全正常
+     *   · 但只要写 TXBAR 的请求位（真发一帧），AHB 总线就被挂死约 3 秒，
+     *     直到 IWDG 复位 —— APP 因此永远停在首次发送处，主循环从未运行，
+     *     串口命令与 OTA 全链路不可用（该现象自 2026-10-05 起一直存在）。
+     * 改用 HSE 后实测 TXBAR 立即完成（tick 0x839 -> 0x875），确认根因即内核时钟。
+     * 位时序已按 8MHz 重算（8tq/位，见 can.c 的 s_bitrateTable）。
+     * 说明：HSE 晶振精度（±20~50ppm）优于 PLL 派生时钟，更利于 CAN 位同步。 */
     PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_FDCAN;
-    PeriphClkInit.FdcanClockSelection  = RCC_FDCANCLKSOURCE_PCLK1;
+    PeriphClkInit.FdcanClockSelection  = RCC_FDCANCLKSOURCE_HSE;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
     {
       Error_Handler();

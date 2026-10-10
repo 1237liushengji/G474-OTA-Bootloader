@@ -258,7 +258,21 @@ static void App_Process(void)
   }
 
 #if (CAN_NODE_ROLE == CAN_NODE_A)
-  /* 2. 板A：周期发送命令帧 */
+  /* 2. 板A：周期发送命令帧
+   *
+   * ⚠️ 【2026-10-10 临时禁用】CAN 发送在真机上会挂死 AHB 总线（详见 can.c 内
+   * 与 docs/APP启动重启循环-诊断报告-2026-10-10.md 的记录）：
+   * 只要写 TXBAR 的请求位（真正请求发一帧），总线就被挂住约 3 秒直到 IWDG 复位。
+   * 已排除的因素：内核时钟源/位时序（HSE 8MHz 与 PCLK1 150MHz 均挂）、
+   * 自动重传开关、回环/正常模式、消息 RAM 地址与可达性、以及控制器状态
+   * （发送前实测 CCCR=0/ECR=0/TXBC=0/TXFQS=3/TXBRP=0，一切正常）。
+   * 在找到根因前，此处禁用周期发送，使主循环能够运行（这也是串口命令可用的前提）。
+   * 修复 CAN 发送后把 CAN_HEARTBEAT_ENABLE 改回 1 即可恢复。 */
+#ifndef CAN_HEARTBEAT_ENABLE
+#define CAN_HEARTBEAT_ENABLE 0
+#endif
+
+#if (CAN_HEARTBEAT_ENABLE != 0)
   if ((now - s_lastCmdTick) >= APP_CMD_PERIOD_MS)
   {
     s_lastCmdTick = now;
@@ -268,6 +282,9 @@ static void App_Process(void)
     CAN_EncodeCmd(payload, s_seq, (uint16_t)((now - s_bootTick) / 1000U));
     (void)CAN_Send(CAN_ID_CMD_A2B, payload, CAN_PAYLOAD_LEN);
   }
+#else
+  s_lastCmdTick = now;                             /* 保持计时器推进，便于恢复时行为一致 */
+#endif
 
   /* 3. 板A链路监视：曾建立链路后超过门限无应答 -> 快闪报警 */
   if (s_linkEverOk != 0U)

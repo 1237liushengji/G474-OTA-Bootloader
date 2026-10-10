@@ -131,8 +131,7 @@ void BSP_UART_EmergencyHex(const char *tag, uint32_t value)
   * `while ((HAL_GetTick()-start) > TIMEOUT)` 变成死循环）。
   */
 void BSP_UART_BootMark(const char *msg)
-{
-  static const char kHexDigits[] = "0123456789ABCDEF";
+{  static const char kHexDigits[] = "0123456789ABCDEF";
   uint32_t          t = HAL_GetTick();
   char              buf[9];
   int               i;
@@ -148,6 +147,26 @@ void BSP_UART_BootMark(const char *msg)
   BSP_UART_EmergencyPuts(" tick=0x");
   BSP_UART_EmergencyPuts(buf);
   BSP_UART_EmergencyPuts("\r\n");
+}
+
+/**
+  * @brief  故障现场快照（供 HardFault / MemManage / BusFault / UsageFault 共用）
+  *
+  * 【2026-10-10 新增】it.c 里的 MemManage/BusFault/UsageFault 三个处理函数原本都是
+  * **静默 `while(1)`**，故障一旦落到它们头上就只剩"约 3 秒后被 IWDG 复位"，
+  * 零线索。本函数只读内核寄存器、不访问栈帧，因此不会引发二次故障。
+  */
+void BSP_UART_FaultDump(const char *tag)
+{
+  BSP_UART_EmergencyPuts("\r\n!! ");
+  BSP_UART_EmergencyPuts(tag);
+  BSP_UART_EmergencyPuts(" !!\r\n");
+  BSP_UART_EmergencyHex("  CFSR  = ", SCB->CFSR);
+  BSP_UART_EmergencyHex("  HFSR  = ", SCB->HFSR);
+  BSP_UART_EmergencyHex("  MMFAR = ", SCB->MMFAR);
+  BSP_UART_EmergencyHex("  BFAR  = ", SCB->BFAR);
+  BSP_UART_EmergencyHex("  MSP   = ", __get_MSP());
+  BSP_UART_EmergencyHex("  PSP   = ", __get_PSP());
 }
 
 void BSP_UART_DiagTask(void)

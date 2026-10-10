@@ -46,5 +46,6 @@ void     BSP_UART_DiagTask(void);
 void     BSP_UART_EmergencyPuts(const char *s);
 void     BSP_UART_EmergencyHex(const char *tag, uint32_t value);
 void     BSP_UART_BootMark(const char *msg);
+void     BSP_UART_FaultDump(const char *tag);
 
 #endif /* __BSP_UART_H */

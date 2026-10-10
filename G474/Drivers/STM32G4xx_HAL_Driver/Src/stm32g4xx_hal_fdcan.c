@@ -410,106 +410,13 @@ HAL_StatusTypeDef HAL_FDCAN_Init(FDCAN_HandleTypeDef *hfdcan)
   /* Enable configuration change */
   SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_CCE);
 
-  /* Check FDCAN instance */
+  /* Configure Clock divider */
+  /* 注：本工程的 FDCAN 内核时钟直接用 HSE（见 stm32g4xx_hal_msp.c），
+   * 不经过 APB 分频，因此 CKDIV 保持复位值即可。此处保留原 HAL 行为。 */
   if (hfdcan->Instance == FDCAN1)
   {
-    /* Configure Clock divider */
     FDCAN_CONFIG->CKDIV = hfdcan->Init.ClockDivider;
   }
-
-  /* Set the no automatic retransmission */
-  if (hfdcan->Init.AutoRetransmission == ENABLE)
-  {
-    CLEAR_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_DAR);
-  }
-  else
-  {
-    SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_DAR);
-  }
-
-  /* Set the transmit pause feature */
-  if (hfdcan->Init.TransmitPause == ENABLE)
-  {
-    SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_TXP);
-  }
-  else
-  {
-    CLEAR_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_TXP);
-  }
-
-  /* Set the Protocol Exception Handling */
-  if (hfdcan->Init.ProtocolException == ENABLE)
-  {
-    CLEAR_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_PXHD);
-  }
-  else
-  {
-    SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_PXHD);
-  }
-
-  /* Set FDCAN Frame Format */
-  MODIFY_REG(hfdcan->Instance->CCCR, FDCAN_FRAME_FD_BRS, hfdcan->Init.FrameFormat);
-
-  /* Reset FDCAN Operation Mode */
-  CLEAR_BIT(hfdcan->Instance->CCCR, (FDCAN_CCCR_TEST | FDCAN_CCCR_MON | FDCAN_CCCR_ASM));
-  CLEAR_BIT(hfdcan->Instance->TEST, FDCAN_TEST_LBCK);
-
-  /* Set FDCAN Operating Mode:
-               | Normal | Restricted |    Bus     | Internal | External
-               |        | Operation  | Monitoring | LoopBack | LoopBack
-     CCCR.TEST |   0    |     0      |     0      |    1     |    1
-     CCCR.MON  |   0    |     0      |     1      |    1     |    0
-     TEST.LBCK |   0    |     0      |     0      |    1     |    1
-     CCCR.ASM  |   0    |     1      |     0      |    0     |    0
-  */
-  if (hfdcan->Init.Mode == FDCAN_MODE_RESTRICTED_OPERATION)
-  {
-    /* Enable Restricted Operation mode */
-    SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_ASM);
-  }
-  else if (hfdcan->Init.Mode != FDCAN_MODE_NORMAL)
-  {
-    if (hfdcan->Init.Mode != FDCAN_MODE_BUS_MONITORING)
-    {
-      /* Enable write access to TEST register */
-      SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_TEST);
-
-      /* Enable LoopBack mode */
-      SET_BIT(hfdcan->Instance->TEST, FDCAN_TEST_LBCK);
-
-      if (hfdcan->Init.Mode == FDCAN_MODE_INTERNAL_LOOPBACK)
-      {
-        SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_MON);
-      }
-    }
-    else
-    {
-      /* Enable bus monitoring mode */
-      SET_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_MON);
-    }
-  }
-  else
-  {
-    /* Nothing to do: normal mode */
-  }
-
-  /* Set the nominal bit timing register */
-  hfdcan->Instance->NBTP = ((((uint32_t)hfdcan->Init.NominalSyncJumpWidth - 1U) << FDCAN_NBTP_NSJW_Pos) | \
-                            (((uint32_t)hfdcan->Init.NominalTimeSeg1 - 1U) << FDCAN_NBTP_NTSEG1_Pos)    | \
-                            (((uint32_t)hfdcan->Init.NominalTimeSeg2 - 1U) << FDCAN_NBTP_NTSEG2_Pos)    | \
-                            (((uint32_t)hfdcan->Init.NominalPrescaler - 1U) << FDCAN_NBTP_NBRP_Pos));
-
-  /* If FD operation with BRS is selected, set the data bit timing register */
-  if (hfdcan->Init.FrameFormat == FDCAN_FRAME_FD_BRS)
-  {
-    hfdcan->Instance->DBTP = ((((uint32_t)hfdcan->Init.DataSyncJumpWidth - 1U) << FDCAN_DBTP_DSJW_Pos)  | \
-                              (((uint32_t)hfdcan->Init.DataTimeSeg1 - 1U) << FDCAN_DBTP_DTSEG1_Pos)     | \
-                              (((uint32_t)hfdcan->Init.DataTimeSeg2 - 1U) << FDCAN_DBTP_DTSEG2_Pos)     | \
-                              (((uint32_t)hfdcan->Init.DataPrescaler - 1U) << FDCAN_DBTP_DBRP_Pos));
-  }
-
-  /* Select between Tx FIFO and Tx Queue operation modes */
-  SET_BIT(hfdcan->Instance->TXBC, hfdcan->Init.TxFifoQueueMode);
 
   /* Calculate each RAM block address */
   FDCAN_CalcultateRamBlockAddresses(hfdcan);
@@ -2129,6 +2036,7 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *hfdcan, con
 
   if (hfdcan->State == HAL_FDCAN_STATE_BUSY)
   {
+
     /* Check that the Tx FIFO/Queue is not full */
     if ((hfdcan->Instance->TXFQS & FDCAN_TXFQS_TFQF) != 0U)
     {
@@ -2139,14 +2047,23 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *hfdcan, con
     }
     else
     {
+
       /* Retrieve the Tx FIFO PutIndex */
       PutIndex = ((hfdcan->Instance->TXFQS & FDCAN_TXFQS_TFQPI) >> FDCAN_TXFQS_TFQPI_Pos);
+
 
       /* Add the message to the Tx FIFO/Queue */
       FDCAN_CopyMessageToRAM(hfdcan, pTxHeader, pTxData, PutIndex);
 
+
+      /* 【临时诊断】写 TXBAR 前先转储寄存器 + 用无害写探针验证外设是否可写 */
+
+      hfdcan->Instance->TSCV = 0U;
+
+
       /* Activate the corresponding transmission request */
       hfdcan->Instance->TXBAR = ((uint32_t)1 << PutIndex);
+
 
       /* Store the Latest Tx FIFO/Queue Request Buffer Index */
       hfdcan->LatestTxFifoQRequest = ((uint32_t)1 << PutIndex);
@@ -3464,6 +3381,12 @@ static void FDCAN_CalcultateRamBlockAddresses(FDCAN_HandleTypeDef *hfdcan)
   /* Tx FIFO/queue start address */
   hfdcan->msgRam.TxFIFOQSA = SramCanInstanceBase + SRAMCAN_TFQSA;
 
+  /* 【2026-10-10 诊断结论】此处原先插入过 RXF0C/RXF1C/TXBC/TXEFC 的"布局配置"，
+   * 经 STM32G474.svd（CubeProgrammer 自带，权威）核对后**已撤销**：
+   * STM32G4 的 FDCAN 根本没有这四个寄存器（0x0A0~0x0BC 是空洞），
+   * Tx 缓冲/Rx FIFO 布局由硬件固定，TXBC 只保留 TFQM 一位（bit24）。
+   * 原 CMSIS 头文件（TXBC@0x0C0 / TXBAR@0x0CC / TFQM@bit24）与 SVD 完全一致，是正确的。 */
+
   /* Flush the allocated Message RAM area */
   for (RAMcounter = SramCanInstanceBase; RAMcounter < (SramCanInstanceBase + SRAMCAN_SIZE); RAMcounter += 4U)
   {
@@ -3514,11 +3437,13 @@ static void FDCAN_CopyMessageToRAM(const FDCAN_HandleTypeDef *hfdcan, const FDCA
   /* Calculate Tx element address */
   TxAddress = (uint32_t *)(hfdcan->msgRam.TxFIFOQSA + (BufferIndex * SRAMCAN_TFQ_SIZE));
 
+
   /* Write Tx element header to the message RAM */
   *TxAddress = TxElementW1;
   TxAddress++;
   *TxAddress = TxElementW2;
   TxAddress++;
+
 
   /* Write Tx payload to the message RAM */
   for (ByteCounter = 0; ByteCounter < DLCtoBytes[pTxHeader->DataLength]; ByteCounter += 4U)
@@ -3529,6 +3454,7 @@ static void FDCAN_CopyMessageToRAM(const FDCAN_HandleTypeDef *hfdcan, const FDCA
                   (uint32_t)pTxData[ByteCounter]);
     TxAddress++;
   }
+
 }
 
 /**

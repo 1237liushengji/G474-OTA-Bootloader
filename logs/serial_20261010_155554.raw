@@ -1,0 +1,40 @@
+[COM7]BL: clock HSE+PLL 150MHz OK
+[COM7]BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+BL: after trial state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+[COM7]BL: clock HSE+PLL 150MHz OK
+[COM7]BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+BL: after trial state=0 trialLeft=[COM7]0 activeSlot=0 lastErr=0x00000001
+[COM7]BL: jump to APP slot 0 base=0x0800C080 size=0xDA78
+[COM7]
+=== STM32G474 CAN Node v3.0.0 [COM7]| role:A(master) | Oct 10 2026 15:55:35 ===
+type 'help' for commands
+> main: led-bsrr-state M3[boot] A: tick alive check tick=0x0000029B
+[COM7][boot] tick0=671 tick1=708 delta=37 (>0 => SysTick 在走)
+[boot] B: before CAN_Init tick=0x000002CA
+[boot] C: after CAN_Init tick=0x000002CD
+[boot] D: before CAN_SelfTest tick=0x000002D1
+[boot] S1: before CAN_Configure(loopback) tick=0x000002D5
+[boot[COM7]] S2: after CAN_Configure(loopback) tick=0x000002DA
+[boot] T1: CAN_Send enter tick=0x000002DF
+[boot] T2: tx fifo free ok tick=0x000002E3
+[boot] T3: before AddMessageToTxFifoQ tick=0x000002E7
+[bo[COM7]BL: clock HSE+PLL 150MHz OK
+[COM7]BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+BL: after trial state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+[COM7]BL: jump to APP slot 0 base=0x0800C080 size=0xDA78
+[COM7]
+=== STM32G474 CAN Node v3.0.0 | role:A(master) | Oct 10 2026 1[COM7]5:55:35 ===
+type 'help' for commands
+> main: led-bsrr-state M3[boot] A: tick alive check tick=0x0000029B
+[COM7][boot] tick0=671 tick1=708 delta=37 (>0 => SysTick 在走)
+[boot] B: before CAN_Init tick=0x000002CA
+[boot] C: after CAN_Init tick=0x000002CD
+[boot] D: befor[COM7]e CAN_SelfTest tick=0x000002D1
+[boot] S1: before CAN_Configure(loopback) tick=0x000002D5
+[boot] S2: after CAN_Configure(loopback) tick=0x000002DA
+[boot] T1: CAN_Send enter tick=0x000002DF
+[boot] T2: tx fifo free ok tick=0x000002E3
+[boot] T3: before Ad[COM7]dMessageToTxFifoQ tick=0x000002E7
+[bo[COM7]BL: clock HSE+PLL 150MHz OK
+[COM7]BL: boot state=0 trialLeft=0 activeSlot=0 lastErr=0x00000001
+BL: after trial state=0 trialLeft=[COM7]0 activeSlot=0 lastErr=0x00000001
