@@ -437,8 +437,32 @@ int main(void)
   Console_Init();                                  /* 打印横幅，等待命令 */
   BSP_UART_Send("main: led-bsrr-state M3\r\n", 24U); /* main.c构建指纹：无此行=烧的旧main.o */
 
+  /* ================= 【2026-10-10 诊断】启动检查点 =================
+   * 真机现象：APP 打印到上一行后，被 IWDG 每 ~3 秒复位一次，主循环从未跑起来
+   * （所以串口 RX 看起来"完全无响应"——Console_Task 根本没机会执行）。
+   * 本段逐步打点 + 打印 tick，把卡点缩到一个函数内；定位完成后可整段删除。
+   * 判读：某条 [boot] 之后再无输出 => 卡在该检查点与其后继之间。
+   * ================================================================ */
+  BSP_UART_BootMark("A: tick alive check");
   {
-    HAL_StatusTypeDef can_st = CAN_Init();           /* FDCAN2 + 过滤器 + 中断 + 启动 */
+    uint32_t          t0 = HAL_GetTick();
+    volatile uint32_t spin;
+
+    for (spin = 0U; spin < 600000U; spin++)        /* 忙等约 40ms@150MHz */
+    {
+      __NOP();
+    }
+    BSP_UART_Printf("[boot] tick0=%lu tick1=%lu delta=%lu (>0 => SysTick 在走)\r\n",
+                    (unsigned long)t0, (unsigned long)HAL_GetTick(),
+                    (unsigned long)(HAL_GetTick() - t0));
+  }
+
+  {
+    HAL_StatusTypeDef can_st;
+
+    BSP_UART_BootMark("B: before CAN_Init");
+    can_st = CAN_Init();                             /* FDCAN2 + 过滤器 + 中断 + 启动 */
+    BSP_UART_BootMark("C: after CAN_Init");
 
     if (can_st != HAL_OK)
     {
@@ -463,20 +487,31 @@ int main(void)
   }
 
   /* 上电自检：内部回环自发自收，验证FDCAN内核+消息RAM+中断+驱动软件链路 */
-  if (CAN_SelfTest())
   {
-    BSP_UART_Send("CAN self-test: PASS\r\n", 21U);
-  }
-  else
-  {
-    BSP_UART_Send("CAN self-test: FAIL\r\n", 21U);
+    bool st;
+
+    BSP_UART_BootMark("D: before CAN_SelfTest");
+    st = CAN_SelfTest();
+    BSP_UART_BootMark("E: after CAN_SelfTest");
+
+    if (st)
+    {
+      BSP_UART_Send("CAN self-test: PASS\r\n", 21U);
+    }
+    else
+    {
+      BSP_UART_Send("CAN self-test: FAIL\r\n", 21U);
+    }
   }
 
+  BSP_UART_BootMark("F: before Uds/OtaTunnel/Ota init");
   Uds_Init();                                      /* ISO-TP+UDS诊断栈（角色自动分配） */
   OtaTunnel_Init();                                /* OTA：串口<->诊断CAN隧道（默认关闭） */
   Ota_Init();                                      /* OTA：读控制区/识别本槽/置试运行待确认 */
+  BSP_UART_BootMark("G: after Uds/OtaTunnel/Ota init");
 
   /* ---- LCD 状态屏（LCD_Init 内含约 760ms 延时，前后各喂一次狗，避免出现喂狗空窗）---- */
+  BSP_UART_BootMark("H: before LCD/IWDG block");
   hiwdg.Instance = IWDG;
   (void)HAL_IWDG_Refresh(&hiwdg);
   LCD_Init();                                      /* 背光开 + 清屏为黑，失败则全白/花屏 */
@@ -518,6 +553,7 @@ int main(void)
   {
     App_Process();
     Console_Task();                                /* 串口命令行控制台 */
+    BSP_UART_DiagTask();                           /* UART 接收链路自诊断（仅收不到时打印） */
     CAN_Task();                                    /* bus-off指数退避恢复调度 */
     IsoTp_Task();                                  /* ISO-TP：STmin节拍/超时 */
     Uds_Task();                                    /* UDS：S3会话/客户端超时 */
@@ -605,6 +641,9 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  /* 【2026-10-10 诊断】不再静默：先把现场打出来（走 TX 轮询，不依赖中断）。
+   * 看到这一行就说明某个 HAL 调用返回了错误并被上层当成致命错误处理。 */
+  BSP_UART_EmergencyPuts("\r\n!! ERROR_HANDLER !! (a HAL call returned error)\r\n");
   __disable_irq();
   while (1)
   {

@@ -87,6 +87,34 @@ void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
+  /* 【2026-10-10 诊断】原实现是静默 `while(1)`，故障现场只剩"约 3 秒后被 IWDG
+   * 复位、串口停在某一行"，一条线索都留不下（实测踩到）。此处先把故障寄存器与
+   * 故障指令地址打出来（直接写 USART1 寄存器，不依赖 HAL / 中断），再保持原语义
+   * 停机等复位。判读：
+   *   CFSR.bit1  DACCVIOL / bit0 IACCVIOL  -> 取指/取数违例（常见于调用空指针）
+   *   CFSR.bit9  PRECISERR + BFAR 有效     -> 访问了非法/未使能的外设地址
+   *   CFSR.bit10 IMPRECISERR               -> 写缓冲导致的异步总线错误
+   *   CFSR.bit25 DIVBYZERO / bit24 UNALIGNED -> 除零/非对齐
+   *   HFSR.bit1  VECTTBL                   -> 取向量失败（VTOR/向量表问题） */
+  {
+    uint32_t exc_return;
+    uint32_t sp;
+    uint32_t stacked_pc;
+
+    __ASM volatile ("mov %0, lr" : "=r" (exc_return));
+    sp = ((exc_return & 0x4U) != 0U) ? __get_PSP() : __get_MSP();
+    stacked_pc = ((const volatile uint32_t *)sp)[6];   /* 栈帧第 7 字 = 故障 PC */
+
+    BSP_UART_EmergencyPuts("\r\n!! HARDFAULT !!\r\n");
+    BSP_UART_EmergencyHex("CFSR  = ", SCB->CFSR);
+    BSP_UART_EmergencyHex("HFSR  = ", SCB->HFSR);
+    BSP_UART_EmergencyHex("MMFAR = ", SCB->MMFAR);
+    BSP_UART_EmergencyHex("BFAR  = ", SCB->BFAR);
+    BSP_UART_EmergencyHex("PC    = ", stacked_pc);
+    BSP_UART_EmergencyHex("MSP   = ", __get_MSP());
+    BSP_UART_EmergencyHex("PSP   = ", __get_PSP());
+  }
+
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {

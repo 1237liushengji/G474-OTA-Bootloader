@@ -38,5 +38,13 @@ int16_t  BSP_UART_GetChar(void);
  * 恒为 0 而"PC 能收到本机输出" => RX 方向断（NVIC/USART/PA10 接线或复用）。 */
 uint32_t BSP_UART_RxIrqCount(void);
 uint32_t BSP_UART_RxDropCount(void);
+/* 接收链路自诊断（RX 收不到时周期性打印寄存器快照，见 .c 内说明） */
+void     BSP_UART_DiagTask(void);
+
+/* 应急输出：直接写 USART1 寄存器，不经 HAL、不依赖中断。
+ * 供 HardFault_Handler / Error_Handler / 启动打点使用。 */
+void     BSP_UART_EmergencyPuts(const char *s);
+void     BSP_UART_EmergencyHex(const char *tag, uint32_t value);
+void     BSP_UART_BootMark(const char *msg);
 
 #endif /* __BSP_UART_H */

@@ -49,6 +49,161 @@ uint32_t BSP_UART_RxDropCount(void)
 }
 
 /**
+  * @brief  接收链路自诊断：RX 完全收不到字节时，周期性把 USART1/GPIO/NVIC 的
+  *         真实寄存器状态打出来（走已知可用的 TX 通路），用于区分
+  *         "信号没到引脚" 与 "信号到了但 USART/中断没处理"。
+  *
+  * 【2026-10-10 新增】起因：真机上 TX 正常（banner 能打出），但 PC 发任何字符
+  * 都零响应，连字符回显都没有。静态代码逐行核对全部正确（引脚 PA9/PA10+AF7、
+  * huart1 单一定义、ISR 接线、NVIC 使能），所以必须靠**运行态测量**定位：
+  *
+  *   判据（PC 侧持续发送时看本 dump）：
+  *     a) PA10 edges/20ms > 0，但 rxIrq 恒 0   -> 信号到了引脚，USART/中断配置问题
+  *     b) PA10 edges/20ms == 0                 -> 信号根本没到引脚（接线/适配器问题）
+  *     c) MODER 的 PA9/PA10 字段不是 0b10      -> 引脚被别处改写成非复用模式
+  *     d) CR1 缺 RE 或 RXNEIE                  -> Receive_IT 未生效
+  *     e) ISER1 bit5 == 0                      -> USART1_IRQn 未使能
+  *
+  * 仅在 s_rxIrqCnt==0（从未收到过）时打印，最多 30 次（约 90 秒），避免刷屏。
+  */
+/**
+  * @brief  应急输出：直接写 USART1 寄存器发送一行文本。
+  *
+  * 【2026-10-10 新增】用于 HardFault_Handler / Error_Handler / 启动打点这类
+  * "HAL 可能已不可用"的场景：不经过 HAL_UART_Transmit（它先检查 gState，
+  * 状态不对会直接返回 HAL_BUSY 而什么都不发），也不依赖任何中断。
+  *
+  * 安全护栏：先检查 CR1 的 UE|TE 位；UART 尚未初始化时**直接放弃输出**，
+  * 避免在"等 TXE"上死等（启动早期故障会走到这里）。
+  */
+void BSP_UART_EmergencyPuts(const char *s)
+{
+  if (s == NULL)
+  {
+    return;
+  }
+  /* UE = CR1.bit0，TE = CR1.bit3；未使能则无法发送，直接返回 */
+  if ((USART1->CR1 & 0x00000009U) != 0x00000009U)
+  {
+    return;
+  }
+
+  while (*s != '\0')
+  {
+    while ((USART1->ISR & 0x00000080U) == 0U)   /* TXE：TDR 可写入 */
+    {
+    }
+    USART1->TDR = (uint32_t)(uint8_t)(*s);
+    s++;
+  }
+  while ((USART1->ISR & 0x00000040U) == 0U)     /* TC：最后一字节移出完毕 */
+  {
+  }
+}
+
+/**
+  * @brief  应急输出一个 32 位十六进制值（形如 "TAG=XXXXXXXX\r\n"）
+  */
+void BSP_UART_EmergencyHex(const char *tag, uint32_t value)
+{
+  static const char kHexDigits[] = "0123456789ABCDEF";
+  char              buf[9];
+  int               i;
+
+  for (i = 0; i < 8; i++)
+  {
+    buf[i] = kHexDigits[(value >> ((7 - i) * 4)) & 0x0FU];
+  }
+  buf[8] = '\0';
+
+  BSP_UART_EmergencyPuts(tag);
+  BSP_UART_EmergencyPuts(buf);
+  BSP_UART_EmergencyPuts("\r\n");
+}
+
+/**
+  * @brief  启动检查点：打印标记 + 当前 tick（十六进制）
+  *
+  * 【2026-10-10 新增】真机现象：APP 打印到 "main: led-bsrr-state M3" 后即被
+  * IWDG 每 3 秒复位，主循环从未跑起来（因此串口 RX 看起来"完全无响应"——
+  * Console_Task 根本没执行）。用这些检查点把卡点逐步缩小到一个函数内，
+  * 同时用 tick 值判断 SysTick 是否在推进（tick 冻结会让 HAL 里所有
+  * `while ((HAL_GetTick()-start) > TIMEOUT)` 变成死循环）。
+  */
+void BSP_UART_BootMark(const char *msg)
+{
+  static const char kHexDigits[] = "0123456789ABCDEF";
+  uint32_t          t = HAL_GetTick();
+  char              buf[9];
+  int               i;
+
+  for (i = 0; i < 8; i++)
+  {
+    buf[i] = kHexDigits[(t >> ((7 - i) * 4)) & 0x0FU];
+  }
+  buf[8] = '\0';
+
+  BSP_UART_EmergencyPuts("[boot] ");
+  BSP_UART_EmergencyPuts(msg);
+  BSP_UART_EmergencyPuts(" tick=0x");
+  BSP_UART_EmergencyPuts(buf);
+  BSP_UART_EmergencyPuts("\r\n");
+}
+
+void BSP_UART_DiagTask(void)
+{
+  static uint32_t s_next = 0U;
+  static uint32_t s_cnt  = 0U;
+  uint32_t        now;
+  uint32_t        edges = 0U;
+  uint32_t        prev;
+  uint32_t        t0;
+
+  if ((s_rxIrqCnt != 0U) || (s_cnt >= 30U))
+  {
+    return;
+  }
+
+  now = HAL_GetTick();
+  if ((s_next != 0U) && ((int32_t)(now - s_next) < 0))
+  {
+    return;
+  }
+  s_next = now + 3000U;
+  s_cnt++;
+
+  /* 20ms 窗口内数 PA10 的跳变次数：PC 正在发数据时应有大量跳变。
+   * 用忙等采样（非阻塞式不可得，UART 无变化中断），20ms 远小于 IWDG 的 3s。 */
+  prev = (GPIOA->IDR & BSP_CONSOLE_RX_PIN) ? 1U : 0U;
+  t0   = HAL_GetTick();
+  while ((HAL_GetTick() - t0) < 20U)
+  {
+    uint32_t cur = (GPIOA->IDR & BSP_CONSOLE_RX_PIN) ? 1U : 0U;
+    if (cur != prev)
+    {
+      edges++;
+      prev = cur;
+    }
+  }
+
+  /* CR1 期望值 0x002D = UE|TE|RE|RXNEIE（bit0/3/2/5）；BRR 期望 0x22A1 @115200/16x */
+  BSP_UART_Printf("[uart] CR1=%04lX CR3=%04lX BRR=%04lX ISR=%08lX\r\n",
+                  (unsigned long)USART1->CR1, (unsigned long)USART1->CR3,
+                  (unsigned long)USART1->BRR, (unsigned long)USART1->ISR);
+  BSP_UART_Printf("[uart] MODER=%08lX IDR=%04lX PA10=%lu edges/20ms=%lu\r\n",
+                  (unsigned long)GPIOA->MODER, (unsigned long)GPIOA->IDR,
+                  (unsigned long)((GPIOA->IDR & BSP_CONSOLE_RX_PIN) ? 1U : 0U),
+                  (unsigned long)edges);
+  /* ISER1 bit5 = USART1_IRQn(37) 使能位 */
+  BSP_UART_Printf("[uart] ISER1=%08lX rxIrq=%lu drop=%lu head=%u tail=%u\r\n",
+                  (unsigned long)NVIC->ISER[1], (unsigned long)s_rxIrqCnt,
+                  (unsigned long)s_rxDropCnt, (unsigned)s_rxHead, (unsigned)s_rxTail);
+  BSP_UART_Printf("[uart] gState=%u RxState=%u RxCnt=%u\r\n",
+                  (unsigned)huart1.gState, (unsigned)huart1.RxState,
+                  (unsigned)huart1.RxXferCount);
+}
+
+/**
   * @brief  初始化控制台串口：时钟、GPIO复用、USART1、中断、启动接收
   */
 void BSP_UART_Init(void)

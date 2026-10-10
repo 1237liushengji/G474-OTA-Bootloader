@@ -1,0 +1,10 @@
+
+Status  FriendlyName             InstanceId
+------  ------------             ----------
+Unknown USB-SERIAL CH340K (COM5) USB\VID_1A86&PID_7522\6&3066F294&0&2
+Unknown STM32 STLink             USB\VID_0483&PID_3748\7&A06F8F&0&1
+Unknown STM32 STLink             USB\VID_0483&PID_3748\7&A06F8F&0&3
+Unknown USB-SERIAL CH340K (COM6) USB\VID_1A86&PID_7522\7&A06F8F&0&1
+Unknown USB-SERIAL CH340K (COM7) USB\VID_1A86&PID_7522\7&A06F8F&0&3
+Unknown STM32 STLink             USB\VID_0483&PID_3748\8
+
