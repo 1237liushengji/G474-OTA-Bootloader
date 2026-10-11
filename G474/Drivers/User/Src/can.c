@@ -55,6 +55,30 @@ static uint32_t     s_bitrate = CAN_BITRATE;          /* 当前位速率 */
 static volatile uint32_t s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS; /* 当前退避时长 */
 static volatile uint32_t s_busOffDueTick;             /* 待执行的恢复时刻（0=无待恢复） */
 
+/* 【2026-10-11 新增】无串口诊断快照：SWD 直读 RAM，绕开 P2 串口不可靠的问题。
+ * 定义在文件作用域（非 static）以便从 .map 查到地址。 */
+CAN_DiagSnap_t g_canDiag;
+
+/**
+  * @brief  抓取一次 FDCAN2 + 芯片身份的快照到 g_canDiag（供 SWD 读取）
+  * @param  stage 阶段码（CAN_DIAG_STAGE_*）
+  * @note   纯寄存器读，不写任何 FDCAN 寄存器，不影响被测对象。
+  *         对 0x4000A750 的读是"消息 RAM 可读性探针"（不写，避免副作用）。
+  */
+void CAN_DiagCapture(uint32_t stage)
+{
+  g_canDiag.magic          = 0xCA9D1A60U;
+  g_canDiag.stage          = stage;
+  g_canDiag.cccr           = FDCAN2->CCCR;
+  g_canDiag.psr            = FDCAN2->PSR;
+  g_canDiag.nbtp           = FDCAN2->NBTP;      /* ← 关键：0 表示位时序从未写入 */
+  g_canDiag.txbc           = FDCAN2->TXBC;
+  g_canDiag.txfqs          = FDCAN2->TXFQS;
+  g_canDiag.txbrp          = FDCAN2->TXBRP;
+  g_canDiag.msg_ram_a750   = *(volatile uint32_t *)0x4000A750U; /* FDCAN2 消息RAM 基址 */
+  g_canDiag.dbgmcu_idcode  = *(volatile uint32_t *)0xE0042000U; /* DEV_ID/REV_ID ← 查 errata */
+}
+
 /* 波特率-分频查找表：FDCAN 内核时钟 = **HSE = 8MHz**（见 stm32g4xx_hal_msp.c），
  * 统一 **16tq/位**（Sync=1 + TSEG1=11 + TSEG2=4）、采样点 75%、SJW=2：
  *   位速率 = 8MHz / (prescaler × 16)

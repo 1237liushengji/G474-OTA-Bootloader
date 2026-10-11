@@ -478,8 +478,21 @@ int main(void)
     HAL_StatusTypeDef can_st;
 
     BSP_UART_BootMark("B: before CAN_Init");
+
+    /* 【2026-10-11 无串口诊断】进入前记录 tick + 抓一份寄存器快照。
+     * 目的：即使串口全挂（P2），也能用 SWD 读 g_canDiag 判定 CAN 状态。 */
+    g_canDiag.tick_before = HAL_GetTick();
+    CAN_DiagCapture(CAN_DIAG_STAGE_INIT_ENTER);
+
     can_st = CAN_Init();                             /* FDCAN2 + 过滤器 + 中断 + 启动 */
     BSP_UART_BootMark("C: after CAN_Init");
+
+    /* 抓"CAN_Init 之后"的寄存器 + 记录返回码与耗时。
+     * 判据：nbtp 若不是 0（应为 0x0D0C0F01 一类的合法值）= 位时序已写入；
+     *       init_status=0 = HAL_OK；tick_after-tick_before 应立即（非 3 秒）。 */
+    g_canDiag.tick_after  = HAL_GetTick();
+    g_canDiag.init_status = (uint32_t)can_st;
+    CAN_DiagCapture(CAN_DIAG_STAGE_INIT_DONE);
 
     if (can_st != HAL_OK)
     {
@@ -510,6 +523,9 @@ int main(void)
     BSP_UART_BootMark("D: before CAN_SelfTest");
     st = CAN_SelfTest();
     BSP_UART_BootMark("E: after CAN_SelfTest");
+
+    g_canDiag.selftest_ok = st ? 1U : 0U;
+    CAN_DiagCapture(CAN_DIAG_STAGE_SELFTEST);
 
     if (st)
     {

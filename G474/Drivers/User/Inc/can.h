@@ -116,6 +116,42 @@ uint32_t          CAN_GetBitrate(void);
 void CAN_Task(void);
 bool CAN_SelfTest(void);
 
+/*--------------------------------------- 无串口诊断（2026-10-11 新增）---------------
+ * 背景：P2（串口 RX 不通 + CH340 DTR/RTS 接 NRST）使串口取证不可靠，
+ *       因此提供一组 volatile 全局量，用 SWD 直接读 RAM 即可判定 CAN 状态。
+ * 用法：
+ *   1) Keil 编译后从 .map 查 CAN_DiagSnap / CAN_DiagStage 的符号地址
+ *   2) STM32_Programmer_CLI -c port=SWD sn=8 mode=UR -r32 <addr> <words>
+ * 全程不碰串口，绕开 P2 的所有干扰。
+ * ----------------------------------------------------------------------------- */
+typedef struct
+{
+  volatile uint32_t magic;        /* 0xCA9D1A60 = 本结构已被填写 */
+  volatile uint32_t stage;        /* 阶段码：见 CAN_DiagStage_e */
+  volatile uint32_t tick_before;  /* CAN_Init 前 HAL_GetTick() */
+  volatile uint32_t tick_after;   /* CAN_Init 后 HAL_GetTick()  */
+  volatile uint32_t init_status;  /* CAN_Init 返回码（0=HAL_OK） */
+  volatile uint32_t selftest_ok;  /* CAN_SelfTest 返回（0/1） */
+  volatile uint32_t cccr;         /* FDCAN2->CCCR  */
+  volatile uint32_t psr;          /* FDCAN2->PSR   */
+  volatile uint32_t nbtp;         /* FDCAN2->NBTP  ← 位时序是否被写入的关键 */
+  volatile uint32_t txbc;         /* FDCAN2->TXBC  ← TFQM 位 */
+  volatile uint32_t txfqs;        /* FDCAN2->TXFQS */
+  volatile uint32_t txbrp;        /* FDCAN2->TXBRP */
+  volatile uint32_t msg_ram_a750; /* FDCAN2 消息RAM 基址可读性探针 */
+  volatile uint32_t dbgmcu_idcode;/* 0xE0042000：DEV_ID + REV_ID ← 用于查 errata */
+} CAN_DiagSnap_t;
+
+/* 阶段码 */
+#define CAN_DIAG_STAGE_IDLE        0U   /* 未开始 */
+#define CAN_DIAG_STAGE_TICK_OK     1U   /* tick 在走（前置检查通过） */
+#define CAN_DIAG_STAGE_INIT_ENTER  2U   /* 即将调 CAN_Init */
+#define CAN_DIAG_STAGE_INIT_DONE   3U   /* CAN_Init 已返回 */
+#define CAN_DIAG_STAGE_SELFTEST    4U   /* 自检已完成 */
+
+extern CAN_DiagSnap_t g_canDiag;
+void CAN_DiagCapture(uint32_t stage);
+
 /*--------------------------------------- 载荷编解码 --------------------------------------*/
 /**
   * @brief  编码命令帧载荷（板A发送）
