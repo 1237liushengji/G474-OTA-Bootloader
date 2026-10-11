@@ -241,9 +241,26 @@ void FDCAN2_IT0_IRQHandler(void)
 
 /**
   * @brief USART1中断服务函数（控制台串口收发）
+  *
+  * 【2026-10-11 诊断】在进 HAL 之前先记一笔"最原始"的入口次数，
+  * 并把 ISR 快照存下来 —— 不依赖 HAL 的任何状态机判断。
+  * 用途：区分下列三种情况（PC 正在发送时，用 SWD 读 g_uartRawIsrCnt / g_uartRawIsrSnap）：
+  *   - g_uartRawIsrCnt == 0            -> USART1 中断从未进入
+  *   - 进入但 ISR.RXNE 从未置位        -> 无数据到达（物理层）
+  *   - 进入且 RXNE 置位                -> 数据到了，看 HAL 为何没回显
   */
+volatile uint32_t g_uartRawIsrCnt  = 0U;   /* USART1 中断入口计数（最原始） */
+volatile uint32_t g_uartRawIsrSnap = 0U;   /* 首次进入时的 ISR 快照 */
+volatile uint32_t g_uartRawSrSnap  = 0U;   /* SR/ISR 在入口处的原始值 */
+
 void USART1_IRQHandler(void)
 {
+  g_uartRawIsrCnt++;
+  if (g_uartRawSrSnap == 0U)
+  {
+    g_uartRawIsrSnap = USART1->ISR;
+    g_uartRawSrSnap  = USART1->ISR;
+  }
   HAL_UART_IRQHandler(&huart1);
 }
 

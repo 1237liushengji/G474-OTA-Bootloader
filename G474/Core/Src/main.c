@@ -659,11 +659,28 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   /* 【2026-10-10 诊断】不再静默：先把现场打出来（走 TX 轮询，不依赖中断）。
-   * 看到这一行就说明某个 HAL 调用返回了错误并被上层当成致命错误处理。 */
+   * 看到这一行就说明某个 HAL 调用返回了错误并被上层当成致命错误处理。
+   *
+   * 【2026-10-11 加固】重要教训：本函数**曾经是无限复位的根源**。
+   *   链条：HAL_UART_Init() 失败 -> 其 MspDeInit 会关闭 USART1 时钟
+   *        -> 本函数调用 BSP_UART_EmergencyPuts() 等 TC -> 时钟关了 TXE/TC
+   *           永不置位 -> 卡死（此时连 __disable_irq 都还没执行到）
+   *        -> 3 秒后 IWDG 复位 -> 无限重启，串口/LED 全无输出。
+   *   现在 BSP_UART_EmergencyPuts 已改为**有界自旋**（见 bsp_uart.c），
+   *   这里再补一层：**用 LED(PE0) 快速闪烁指示"进了 Error_Handler"**，
+   *   这样即使串口完全不可用，也能用肉眼确认死锁位置。
+   *   之后停机等待 IWDG 复位（保留原语义，便于现场反复观察 LED 快闪）。 */
   BSP_UART_EmergencyPuts("\r\n!! ERROR_HANDLER !! (a HAL call returned error)\r\n");
   __disable_irq();
-  while (1)
+
+  /* 既然进了致命错误，就用 LED 持续快闪打标（不依赖串口、不依赖中断）。
+   * PE0 低电平点亮；这里纯 GPIO 写，时钟在最早期已由 main() 开头使能。 */
+  for (;;)
   {
+    GPIOE->BRR  = (1UL << 0);                     /* 亮 */
+    for (volatile uint32_t d = 0U; d < 800000U; d++) { __NOP(); }
+    GPIOE->BSRR = (1UL << 0);                     /* 灭 */
+    for (volatile uint32_t d = 0U; d < 800000U; d++) { __NOP(); }
   }
   /* USER CODE END Error_Handler_Debug */
 }

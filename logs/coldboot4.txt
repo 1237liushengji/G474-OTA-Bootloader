@@ -1,0 +1,6 @@
+=== 监听 ['COM3'] @ 115200，持续 60.0s ===
+>>> 现在请给板子【断电 3 秒 → 上电】 <<<
+
+[COM3] 打不开: GetOverlappedResult failed (PermissionError(13, '拒绝访问。', None, 5))
+
+=== 结果 ===

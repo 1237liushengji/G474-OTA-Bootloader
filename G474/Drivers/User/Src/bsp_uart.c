@@ -88,16 +88,37 @@ void BSP_UART_EmergencyPuts(const char *s)
     return;
   }
 
+  /* 【2026-10-11 关键修复】原来的"等 TXE/TC"是**无限循环**，一旦 USART1
+   * 的内核时钟被关（典型场景：HAL_UART_Init() 失败时 HAL_UART_MspDeInit()
+   * 会 __HAL_RCC_USART1_CLK_DISABLE()），TXE/TC 永远不置位 -> 卡死。
+   * 而本函数恰恰是从 Error_Handler() 里调用的 —— 于是形成
+   *   HAL_UART_Init 失败 -> Error_Handler -> EmergencyPuts 等 TC 卡死
+   *   -> 3 秒后 IWDG 复位 -> 无限重启，且一条日志都打不出来。
+   * 现在改成**有界自旋**：等不到就直接放弃本行输出，绝不阻塞。
+   * 采样次数取 ~200000（150MHz 下约几毫秒），足够 115200 发出 1~5 字节。 */
   while (*s != '\0')
   {
-    while ((USART1->ISR & 0x00000080U) == 0U)   /* TXE：TDR 可写入 */
+    uint32_t guard = 200000U;
+
+    while (((USART1->ISR & 0x00000080U) == 0U) && (guard != 0U))   /* 等 TXE（有界） */
     {
+      guard--;
+    }
+    if (guard == 0U)
+    {
+      return;                                    /* 时钟/外设异常：放弃输出，绝不卡死 */
     }
     USART1->TDR = (uint32_t)(uint8_t)(*s);
     s++;
   }
-  while ((USART1->ISR & 0x00000040U) == 0U)     /* TC：最后一字节移出完毕 */
+
   {
+    uint32_t guard = 200000U;
+
+    while (((USART1->ISR & 0x00000040U) == 0U) && (guard != 0U))   /* 等 TC（有界） */
+    {
+      guard--;
+    }
   }
 }
 
@@ -255,7 +276,16 @@ void BSP_UART_Init(void)
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
   if (HAL_UART_Init(&huart1) != HAL_OK)
   {
-    Error_Handler();
+    /* 【2026-10-11 加固】不再直接 Error_Handler()：
+     * HAL_UART_Init 失败时它内部的 MspDeInit 已经把 USART1 时钟关掉了，
+     * 进 Error_Handler 只会立刻卡死（历史上正是这条路径造成无限重启）。
+     * 这里改为**把失败状态直接写死在 USART1 寄存器上**（重新使能时钟后
+     * 用 CR1 打标记），并**返回**，让上层继续跑 —— 至少 LED/主循环还在，
+     * 可用 SWD 或 LED 观察。 */
+    __HAL_RCC_USART1_CLK_ENABLE();     /* 重新开时钟，保证寄存器可写 */
+    USART1->CR1 = 0x0000DEADUL;        /* 打标记：低 16 位 0xDEAD 表示 UART 初始化失败 */
+    USART1->BRR = 0xBAD00000UL;        /* 再打一个可识别的标记 */
+    return;                            /* 软失败：不让整个系统卡死 */
   }
 
   /* 优先级低于FDCAN中断（1），串口交互实时性要求低 */

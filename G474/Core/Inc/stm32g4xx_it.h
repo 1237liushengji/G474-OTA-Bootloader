@@ -45,6 +45,14 @@
 
 /* USER CODE END EM */
 
+/* Exported variables --------------------------------------------------------*/
+/* USER CODE BEGIN EV */
+/* 【2026-10-11 串口 RX 诊断】USART1 中断入口最原始计数与快照（定义在 it.c） */
+extern volatile uint32_t g_uartRawIsrCnt;
+extern volatile uint32_t g_uartRawIsrSnap;
+extern volatile uint32_t g_uartRawSrSnap;
+/* USER CODE END EV */
+
 /* Exported functions prototypes ---------------------------------------------*/
 void NMI_Handler(void);
 void HardFault_Handler(void);
