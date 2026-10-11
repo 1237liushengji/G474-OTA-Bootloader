@@ -56,13 +56,12 @@ static volatile uint32_t s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS; /* 当�
 static volatile uint32_t s_busOffDueTick;             /* 待执行的恢复时刻（0=无待恢复） */
 
 /* 波特率-分频查找表：FDCAN 内核时钟 = **HSE = 8MHz**（见 stm32g4xx_hal_msp.c），
- * 统一 **8tq/位**（Sync=1 + TSEG1=5 + TSEG2=2）、采样点 75%、SJW=2：
- *   位速率 = 8MHz / (prescaler × 8)
- *   125k -> 8    250k -> 4    500k -> 2    1M -> 1
- * 【2026-10-10 修复】原表按"PCLK1=150MHz 直入 + 10tq/位"计算（120/60/30/15）。
- * 150MHz 超出 FDCAN 内核时钟上限：协议引擎无法处理发送请求，写 TXBAR 会挂死
- * AHB 约 3 秒直到 IWDG 复位 —— APP 每次都在首次发送处重启（主循环从未运行）。
- * 内核时钟改 HSE 后，tq 数由 10 改为 8 以保持四个档位都能整除。 */
+ * 统一 **16tq/位**（Sync=1 + TSEG1=11 + TSEG2=4）、采样点 75%、SJW=2：
+ *   位速率 = 8MHz / (prescaler × 16)
+ *   125k -> 4    250k -> 2    500k -> 1    1M -> 不可达（表中置 0 = 不支持）
+ * 【2026-10-11】1M 档在 8MHz+16tq 下需 prescaler=0.5，不可达；
+ * 表中以 0 表示"不支持"，CAN_BitrateToPrescaler() 返回 0 时上层显式失败，
+ * 不会静默跑成错误速率。 */
 static const uint32_t s_bitrateTable[][2] =
 {
   { 125000U, 4U },
@@ -115,11 +114,18 @@ static HAL_StatusTypeDef CAN_Configure(void)
   }
 
   /* 位时序：内核时钟 = **HSE = 8MHz**（见 stm32g4xx_hal_msp.c），不经 APB 分频，
-   * 8tq/位（Sync 1 + TSEG1 5 + TSEG2 2）、采样点 75%、SJW=2。
-   * 【2026-10-10 修复】原设计是"PCLK1 = 150MHz 直入 + 10tq/位"，150MHz 超出
-   * FDCAN 内核时钟上限，协议引擎无法处理发送请求（写 TXBAR 会挂死 AHB 约 3 秒
-   * 直到 IWDG 复位）—— APP 每次都在首次发送处重启，主循环从未运行。
-   * 改用 HSE 后位时序按 8MHz 重算，四个波特率档位均可整除。 */
+   * 统一 **16tq/位**（Sync 1 + TSEG1 11 + TSEG2 4）、采样点 **75%**、SJW=2。
+   *   位速率 = 8MHz / (prescaler × 16)
+   *   125k -> 4    250k -> 2    500k -> 1    1M -> 不可达（表中置 0）
+   *
+   * 【2026-10-11 修复】原参数 TSEG1=13/TSEG2=2 同样是 16tq，波特率也对，
+   * 但采样点是 (1+13)/16 = 87.5%，偏离 CAN 推荐的 75%~87.5% 区间上限，
+   * 长总线/高负载下位同步裕度不足。改为 11/4 取得 75%。
+   *
+   * 【重要历史】2026-10-10 曾把内核时钟从 PCLK1=150MHz 改成 HSE 8MHz，
+   * 当时的"元凶是内核时钟超频"结论**建立在 HAL_FDCAN_Init 被删空的错误基础上**
+   * （见 docs/13）。真正原因是 HAL 库被插桩时误删了 NBTP/TXBC/CCCR 配置段，
+   * 导致位时序寄存器**从未被写入**。现已还原 HAL 并复核本参数。 */
   hfdcan2.Instance                            = FDCAN2;
   hfdcan2.Init.ClockDivider                   = FDCAN_CLOCK_DIV1;
   hfdcan2.Init.FrameFormat                    = FDCAN_FRAME_CLASSIC;
@@ -140,12 +146,12 @@ static HAL_StatusTypeDef CAN_Configure(void)
   hfdcan2.Init.ProtocolException              = ENABLE;
   hfdcan2.Init.NominalPrescaler               = prescaler;
   hfdcan2.Init.NominalSyncJumpWidth           = 2U;
-  hfdcan2.Init.NominalTimeSeg1                = 13U;      /* 传播段+相位段1（共 16tq/位） */
-  hfdcan2.Init.NominalTimeSeg2                = 2U;
+  hfdcan2.Init.NominalTimeSeg1                = 11U;      /* 传播段+相位段1（16tq/位，采样点75%） */
+  hfdcan2.Init.NominalTimeSeg2                = 4U;
   hfdcan2.Init.DataPrescaler                  = prescaler;
   hfdcan2.Init.DataSyncJumpWidth              = 2U;
-  hfdcan2.Init.DataTimeSeg1                   = 13U;
-  hfdcan2.Init.DataTimeSeg2                   = 2U;
+  hfdcan2.Init.DataTimeSeg1                   = 11U;
+  hfdcan2.Init.DataTimeSeg2                   = 4U;
   /* 过滤器数量：混杂/自检模式1个(全收，多过滤器会重复存帧)；正常模式2个(心跳+诊断) */
   /* OTA 扩展：正常模式需要同时收 0x7E0(请求) 与 0x7E8(应答) 两个诊断 ID。
    * 一条掩码型过滤器只能匹配"一个 ID + 一个掩码"（FilterID2 是掩码而非第二个 ID），
@@ -302,6 +308,12 @@ HAL_StatusTypeDef CAN_Init(void)
 /**
   * @brief  上电自检：内部回环自发自收一帧（不驱动总线引脚）
   * @retval true=软件链路完整；false=自检失败
+  *
+  * 【2026-10-10 曾错误地跳过本项自检】当时的结论是"回环模式下写 TXBAR 会
+  * 挂死 AHB"，并据此把回环发送整段删除。2026-10-11 复查发现真正原因是
+  * **HAL_FDCAN_Init 被插桩时误删了 NBTP/TXBC/CCCR 配置段**（导致位时序
+  * 寄存器从未写入、控制器未配置），与"回环"无关（见 docs/13）。
+  * HAL 还原后，回环自发自收是验证 FDCAN 软件链路最直接的手段，故恢复。
   */
 bool CAN_SelfTest(void)
 {
@@ -321,20 +333,31 @@ bool CAN_SelfTest(void)
   }
   BSP_UART_BootMark("S2: after CAN_Configure(loopback)");
 
-  /* 【2026-10-10 修复】跳过回环发送。
-   * 实测：在 INTERNAL_LOOPBACK 模式下写 TXBAR 请求发送会把 AHB 总线挂死约 3 秒，
-   * 直到 IWDG 复位（与内核时钟、位时序均无关：26.7kbps 与 500kbps 两种时序分别验证，
-   * 都会挂）。正常模式发送不受影响（周期心跳帧工作正常）。
-   * 因此"回环自发自收"这项自检无法保留，改为只验证配置与启动流程
-   * （下面的 S5/S6 会恢复为正常模式配置）。 */
-  BSP_UART_BootMark("S3: loopback TX skipped (hangs bus on this chip)");
-  (void)testPayload;
-  (void)msg;
-  (void)start;
+  /* 回环自发自收：内部回环模式下 TX 不入总线，RX 直接收到自己发的帧 */
+  if (CAN_Send(CAN_ID_CMD_A2B, testPayload, CAN_PAYLOAD_LEN) == HAL_OK)
+  {
+    start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 50U)            /* 最长等 50ms，不无限阻塞 */
+    {
+      if (CAN_PollRx(&msg))
+      {
+        if ((msg.id == CAN_ID_CMD_A2B) && (msg.len == CAN_PAYLOAD_LEN))
+        {
+          ok = true;                                 /* ID 与长度对上即认为链路通 */
+        }
+        break;
+      }
+    }
+  }
+  BSP_UART_BootMark(ok ? "S4: loopback RX OK" : "S4: loopback RX TIMEOUT");
 
   s_loopbackSelfTest = false;
   BSP_UART_BootMark("S5: before restore CAN_Configure");
-  (void)CAN_Configure();                             /* 恢复正常模式 */
+  if (CAN_Configure() != HAL_OK)                     /* 恢复正常模式 */
+  {
+    BSP_UART_BootMark("S5b: restore cfg FAILED");
+    return false;
+  }
   BSP_UART_BootMark("S6: after restore");
   return ok;
 }
