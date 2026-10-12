@@ -171,8 +171,16 @@ static void IsoTp_RxFrame(const uint8_t *data, uint8_t len)
     s_rxState   = RX_COLLECT;
     s_rxLastTick = HAL_GetTick();
 
-    /* FC: FS=CTS, BS=0(不限块), STmin=2ms */
-    IsoTp_SendFc(0x30U, 0x00U, 0x02U);
+    /* FC: FS=CTS, BS=0(不限块), STmin=1ms
+     * 【2026-10-12 两轮实测修正】
+     *   初版 STmin=2ms：每帧 CF 都等 2ms，一个 1010 字节的 0x36 块 = 145 帧
+     *   ≈ 290ms/块，整镜像需~23s，客户端每轮只传8 块就超时。
+     *   改 STmin=0 后速率上去了，但**板 A 侧出现"0x36 发完收不到任何应答"**：
+     *   CF 之间零间隔会让对端 IsoTp_RxFrame 与本端 CAN 轮询抢占，CAN 溢出丢帧
+     *   （表现为 s_dl 已回 IDLE、received 已满，但对端一个字节应答都没发出）。
+     *   取 1ms：79 块 × 145 帧 × 1ms ≈ 11.5s，远小于客户端 30s 传输超时，
+     *   同时给对端留足处理余量。 */
+    IsoTp_SendFc(0x30U, 0x00U, 0x01U);
   }
   else if (pci == 0x2U)                           /* CF */
   {
@@ -290,17 +298,33 @@ void IsoTp_Task(void)
     {
       uint8_t frame[CAN_PAYLOAD_LEN];
       uint8_t n = 0U;
-
-      frame[n++] = (uint8_t)(0x20U | s_txNextSn);
-      s_txNextSn = (uint8_t)((s_txNextSn + 1U) & 0x0FU);
-      while ((n < CAN_PAYLOAD_LEN) && (s_txSent < s_txLen))
+      /* ★★ 必须用局部游标 i，不能原地推进 s_txSent。
+       *   原因：s_txSent 只在 CAN_Send 成功后才能提交（见下），
+       *   若此处直接 s_txSent++，FIFO 满时这 7 字节会被丢弃却已计入 SN 进度。
+       *   【2026-10-13 根因修复】原实现写成
+       *       frame[n++] = s_txbuf[s_txSent];      ← 游标从不递增！
+       *   导致每个 CF 帧的 7 个数据字节被 s_txSent 指向的同一个字节重复填满，
+       *   而循环靠 n 递增退出、s_txSent 只在发送成功后 += (n-1)，
+       *   于是跨帧数据错位。地面真相：11 字节的 0x34 请求里
+       *   FF 帧（req[0..5]，直接用 data[]）完全正确 → addr=0x08040880 ✅
+       *   CF 帧（req[6..10]，用 s_txbuf[]）全变 0x80    → size=0x80808080 ❌
+       *   这同时解释了"0x36 大块传输最后几块莫名卡住"与所有多帧乱码。 */
       {
-        frame[n++] = s_txbuf[s_txSent++];
+        uint16_t i = s_txSent;
+        while ((n < CAN_PAYLOAD_LEN) && (i < s_txLen))
+        {
+          frame[n++] = s_txbuf[i++];
+        }
       }
       (void)memset(&frame[n], 0, (size_t)(CAN_PAYLOAD_LEN - n));
 
       if (CAN_Send(s_txId, frame, CAN_PAYLOAD_LEN) == HAL_OK)
       {
+        /* ★ 只有发送成功才推进 s_txSent / s_txNextSn。
+         *   局部游标 i 从 s_txSent 出发单调前进，本帧共装 (n-1) 字节，
+         *   故 s_txSent += (n-1) 恰好等价于提交 i，语义与"成功才前进"一致。 */
+        s_txSent     += (uint16_t)(n - 1U);
+        s_txNextSn   = (uint8_t)((s_txNextSn + 1U) & 0x0FU);
         s_txLastTick = now;
 
         if (s_txBlockLeft > 0U)
@@ -308,19 +332,19 @@ void IsoTp_Task(void)
           s_txBlockLeft--;
           if ((s_txBlockLeft == 0U) && (s_txSent < s_txLen))
           {
-            s_txState = TX_WAIT_FC;               /* 块发完，等下一个FC */
+            s_txState = TX_WAIT_FC;                 /* 块发完，等下一个FC */
             s_txLastTick = now;
           }
         }
 
         if (s_txSent >= s_txLen)
         {
-          s_txState = TX_IDLE;                    /* 发送完成 */
+          s_txState = TX_IDLE;                      /* 发送完成 */
         }
       }
       else
       {
-        s_txLastTick = now;                       /* CAN忙：下个节拍重试该CF */
+        s_txLastTick = now;                         /* CAN忙：下个节拍重试该CF */
       }
     }
   }
