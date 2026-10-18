@@ -1,9 +1,0 @@
-=== 监听 ['COM5', 'COM3'] @ 115200，持续 120.0s ===
->>> 现在请给板子【断电 3 秒 → 上电】 <<<
-
-[COM3] 打不开: GetOverlappedResult failed (PermissionError(13, '拒绝访问。', None, 5))
-
-=== 结果 ===
---- COM5 : 0 字节 ---
-(静默)
-

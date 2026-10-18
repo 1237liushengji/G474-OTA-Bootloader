@@ -43,8 +43,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PROJ = os.path.join(ROOT, "G474", "MDK-ARM", "G474.uvprojx")
 PROJ_BAK = PROJ + ".slotbak"
 HEX_IN = os.path.join(ROOT, "G474", "MDK-ARM", "G474", "G474.hex")
-UV4 = r"D:/U5/UV4/UV4.exe"
-PY = sys.executable
+UV4 = os.environ.get("KEIL_UV4", r"D:/U5/UV4/UV4.exe")   # 可用 KEIL_UV4 覆盖
+PY = os.environ.get("PYTHON", sys.executable)
 
 # 槽 -> (IROM1 起始, VECT_TAB_OFFSET)
 SLOT_MAP = {
