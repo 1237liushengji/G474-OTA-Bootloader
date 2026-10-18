@@ -193,15 +193,11 @@ static void IsoTp_RxFrame(const uint8_t *data, uint8_t len)
     s_rxLastTick = HAL_GetTick();
 
 
-    /* FC: FS=CTS, BS=0(不限块), STmin=8ms
-     * 【2026-10-18】接收侧容忍窗口 = STmin × 硬件 RX FIFO 深度。
-     *   HAL 把 SRAMCAN_RF0_NBR 硬编码为 3（vendor 文件不可改），
-     *   而板B 主循环存在阻塞段：2KB Flash 页写、UART 诊断打印、
-     *   软 SPI 刷屏 —— 单段可达 10~25ms。STmin=1/2ms 时
-     *   （容忍 3/6ms）每块必丢一帧，实测每块都要重发一次。
-     *   取 8ms → 容忍 24ms；单块 144 CF × 8ms ≈ 1.15s，
-     *   79 块 ≈ 91s，仍远小于客户端单块 5s 窗口与整体流程预期。 */
-    IsoTp_SendFc(0x30U, 0x00U, 0x08U);
+    /* FC: FS=CTS, BS=0(不限块), STmin=2ms
+     * 单块 144 CF × 2ms ≈ 290ms，79 块 ≈ 23s，远小于客户端单块 5s 窗口。
+     * （此前用 8ms 试图规避丢帧，实测反而更差且拖慢 4 倍 —— 丢帧的真实原因
+     *   是"重复帧被误判为 SN 错误"，已在 CF 分支修正，无需靠放慢规避。） */
+    IsoTp_SendFc(0x30U, 0x00U, 0x02U);
   }
   else if (pci == 0x2U)                           /* CF */
   {
@@ -213,6 +209,21 @@ static void IsoTp_RxFrame(const uint8_t *data, uint8_t len)
     uint8_t sn = (uint8_t)(data[0] & 0x0FU);
     if (sn != s_rxNextSn)
     {
+      /* ★【2026-10-18 关键修复】区分"重复/迟到帧"与"真正的跳号"。
+       *   4bit SN 的模 16 差值能唯一判断前后关系：
+       *     diff = (期望SN - 收到SN) & 0x0F
+       *     diff 1..7  → 收到的是**已经收过**的旧帧（重复/迟到）→ 丢弃并继续，
+       *                  绝不能因此作废整块（实测 got=9 want=11 正是这种，
+       *                  原实现直接 abort，导致每块都要重发一次）。
+       *     diff 9..15 → 收到的是**超前**的帧，说明中间漏了帧，
+       *                  无法补齐，只能作废等待对端整块重发。 */
+      uint8_t diff = (uint8_t)((s_rxNextSn - sn) & 0x0FU);
+
+      if ((diff >= 1U) && (diff <= 7U))
+      {
+        return;                                  /* 重复帧：静默丢弃 */
+      }
+
       ISOTP_TRACE("[tp] CF SN err got=%u want=%u\r\n", (unsigned)sn, (unsigned)s_rxNextSn);
       s_rxState = RX_IDLE;
       if (s_errCb != NULL)

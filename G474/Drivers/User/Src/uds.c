@@ -18,6 +18,7 @@
 #include "can.h"
 #include "bsp_uart.h"
 #include "ota_agent.h"   /* OTA：0x34/0x36/0x37/0x31/0x11 与 F180~F190 */
+#include "ota_client.h"  /* 【2026-10-12】板A 板内 OTA 客户端（状态机） */
 #include <string.h>
 
 /*--------------------------------------- 模块状态 --------------------------------------*/
@@ -290,6 +291,10 @@ static void Uds_ClientErr(IsoTp_Result result)
   }
   BSP_UART_Send(msg, (uint16_t)strlen(msg));
   s_pendingResp = false;
+
+  /* 【2026-10-12】转给板内 OTA 客户端：ISO-TP 层的失败必须把状态机踢出
+   * "等应答"僵局，否则 s_rspPending 永远为 true，客户端既不推进也不超时。 */
+  OtaClient_OnIsoTpErr((uint8_t)result);
 }
 
 /**
@@ -313,6 +318,10 @@ void Uds_ClientOnMsg(const uint8_t *rsp, uint16_t len)
 {
   s_pendingResp = false;
 
+  /* 【2026-10-12】板A 板内 OTA 客户端：把完整应答交给状态机推进。
+   * 必须在下面的人读解码之前调用（状态机要靠 SID 回推进）。 */
+  OtaClient_OnResp(rsp, len);
+
   /* 会话镜像：0x10的正/负应答更新客户端会话认知 */
   if ((len == 6U) && (rsp[0] == 0x50U))
   {
@@ -326,6 +335,19 @@ void Uds_ClientOnMsg(const uint8_t *rsp, uint16_t len)
   else
   {
     /* 其他应答 */
+  }
+
+  /*【2026-10-12降噪】OTA 全量传输会产生数千条 0x36 应答，逐条打印会把
+   * 115200 波特率的串口刷满，真正的 [ota] 阶段日志被挤出缓冲、抓不到。
+   * 故每 200 条打印一次采样；OTA 客户端自己会打关键节点日志，不受影响。 */
+  {
+    static uint32_t s_diagLogCnt;
+    s_diagLogCnt++;
+    if ((s_diagLogCnt % 200U) != 1U)
+    {
+      return;                                     /* 跳过本次的解码与打印 */
+    }
+    BSP_UART_Printf("[diag] #%u ", (unsigned)s_diagLogCnt);
   }
 
   BSP_UART_Printf("diag<< (%u bytes):", (unsigned)len);

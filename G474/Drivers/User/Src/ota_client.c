@@ -638,11 +638,24 @@ void OtaClient_Task(void)
       {
         if (s_elapsed(s_sentTick, rspTimeoutMs))
         {
-          BSP_UART_Printf("[ota] no rsp in step %u (%lums), retry\r\n",
-                          (unsigned)s_state, (unsigned long)rspTimeoutMs);
-          s_rspPending = false;
-          /* 退回上一步重试：整体重来最简单可靠 */
-          s_go(OTA_CS_FAIL);
+          /* ★ 传输态同样走"单块重发"，不能直接判整轮失败 ——
+           *   否则前面 78 块全白传（实测走到第 79 块才被这条判死）。
+           *   对端在块失败后 s_expectedSeq 未推进，重发同一 seq 可直接接受。 */
+          if ((s_state == OTA_CS_TRANSFER) && (s_xferRetry < OTA_CLIENT_XFER_RETRY_MAX))
+          {
+            s_xferRetry++;
+            s_rspPending = false;
+            BSP_UART_Printf("[ota] block retry %u/%u off=%lu seq=%u\r\n",
+                            (unsigned)s_xferRetry, (unsigned)OTA_CLIENT_XFER_RETRY_MAX,
+                            (unsigned long)s_off, (unsigned)UDS_BLOCK_SEQ_OF(s_seq));
+          }
+          else
+          {
+            BSP_UART_Printf("[ota] no rsp in step %u (%lums), give up\r\n",
+                            (unsigned)s_state, (unsigned long)rspTimeoutMs);
+            s_rspPending = false;
+            s_go(OTA_CS_FAIL);              /* 退回整体重来 */
+          }
         }
         break;                                 /* 等应答中，不重复发 */
       }

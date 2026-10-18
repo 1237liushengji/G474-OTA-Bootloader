@@ -78,6 +78,7 @@ void Console_Init(void)
 
   BSP_UART_Printf("\r\n=== STM32G474 CAN Node v%s | role:%s | %s %s ===\r\n",
                   CAN_APP_VERSION, role, __DATE__, __TIME__);
+  BSP_UART_Printf("[FP] board fingerprint = %s\r\n", APP_BOARD_FINGERPRINT);
   Put("type 'help' for commands\r\n> ");
 }
 

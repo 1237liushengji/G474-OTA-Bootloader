@@ -774,7 +774,17 @@ static bool Ota_SynthImageHeader(uint8_t slot, uint32_t total, uint32_t crc)
   (void)memset(hdr, 0xFFU, sizeof(hdr));        /* 填充区先全 0xFF，再写头 */
 
   PutU32LE(&hdr[OTA_IMG_OFF_MAGIC],        OTA_IMG_MAGIC);
-  PutU32LE(&hdr[OTA_IMG_OFF_IMG_SIZE],     OTA_IMG_HDR_STRUCT_SIZE + total);
+  /* ★★【2026-10-18 根因修复】imgSize 必须等于 payloadSize + OTA_IMG_HDR_SIZE(0x80)。
+   *   原写成 OTA_IMG_HDR_STRUCT_SIZE(32) + total，比正确值小 0x60。
+   *   Bootloader 的 BL_ImageReadHeader() 明确要求
+   *       imgSize == payloadSize + OTA_IMG_HDR_SIZE
+   *   不满足即返回 BL_IMG_ERR_SIZE_RANGE(=4)，于是：
+   *   FF02 明明成功（TRIAL 标志、trialLeft 都正确落盘），复位后 BL 却判
+   *       "slot 1 image invalid (err=0x00000004)" → 回退到旧槽，
+   *   表现为"OTA 全流程跑完但新固件不生效"。
+   *   （工厂镜像脚本 make_factory_image.py 一直写的是 0x80，所以 Slot A 正常，
+   *     只有走 0x34/0x36 之后由设备自己合成的头才是错的。） */
+  PutU32LE(&hdr[OTA_IMG_OFF_IMG_SIZE],     OTA_IMG_HDR_SIZE + total);
   PutU32LE(&hdr[OTA_IMG_OFF_PAYLOAD_SIZE], total);
   /* version 缺省 0（协议允许；后续可经 0x2E DID 下发） */
   hdr[OTA_IMG_OFF_VERSION + 0U] = 0x00U;
@@ -975,7 +985,21 @@ void Ota_OnRoutineControl(const uint8_t *req, uint16_t len)
         break;
       }
 
-      pageBase = (s_targetSlot == 0U) ? OTA_CFG_MIRROR_ADDR : OTA_CFG_PRIMARY_ADDR;
+      /* ★★【2026-10-18 根因修复】控制区写目标页必须按**运行槽**的对侧 Bank 选，
+       *   不能按目标槽选。
+       *
+       *   STM32G4 双 Bank：对**正在执行代码的那个 Bank** 做擦除/编程时，
+       *   该 Bank 的所有取指都会被 ftfl 接口挂起 —— 同 Bank 擦写等于把 CPU 冻住，
+       *   表现为 APP 在 FF02 直接复位、随后由 BL 接手（BL 日志
+       *   `BL: synth header validate FAIL slot 1 (err 7)`）。
+       *
+       *   原实现写的是 `(s_targetSlot == 0U) ? MIRROR : PRIMARY`，
+       *   而 targetSlot 恒等于 !runningSlot —— 于是**恰好总是选中正在运行的那一侧**：
+       *     运行 Slot A(Bank1) → target=1 → 选 PRIMARY(0x08000000, Bank1) ❌
+       *     运行 Slot B(Bank2) → target=0 → 选 MIRROR (0x08040000, Bank2) ❌
+       *   改为按 runningSlot 反选，保证擦写永远发生在**另一个 Bank**：
+       *     运行 Bank1 → 写 MIRROR(Bank2)；运行 Bank2 → 写 PRIMARY(Bank1)。 */
+      pageBase = (s_runningSlot == 0U) ? OTA_CFG_MIRROR_ADDR : OTA_CFG_PRIMARY_ADDR;
 
       /* 1. 整页暂存到 s_pageBuf（不压栈） */
       (void)memcpy(s_pageBuf, (const void *)pageBase, OTA_CFG_PAGE_SIZE);
@@ -1179,6 +1203,11 @@ void Ota_Init(void)
   * @note   判据刻意用工程里现成的信号（CAN 统计与自检），不新增语义。
   *         未通过则不落定 —— 让 Bootloader 在后续复位中按 trialLeft 自动回滚。
   */
+bool Ota_IsDownloading(void)
+{
+  return (s_dl == OTA_DL_ACTIVE);
+}
+
 void Ota_Task(void)
 {
   if (!s_trialPending)

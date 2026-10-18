@@ -15,6 +15,16 @@
 #include <stdint.h>
 #include "can.h"
 
+/* 【2026-10-11 板身份指纹】构建时用 -D APP_BOARD_FP=FP_A1 注入裸 token，
+ * 这里 stringify。目的是把「ST-Link SN <-> 芯片 <-> COM 口 <-> 哪版固件」钉死。
+ * 定位完成后删掉。 */
+#ifndef APP_BOARD_FP
+#define APP_BOARD_FP   FP_X0
+#endif
+#define APP_STR_(x)    #x
+#define APP_STR(x)     APP_STR_(x)
+#define APP_BOARD_FINGERPRINT   APP_STR(APP_BOARD_FP)
+
 void Console_Init(void);
 void Console_Task(void);
 bool Console_SniffEnabled(void);

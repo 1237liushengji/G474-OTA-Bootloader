@@ -42,6 +42,12 @@ void     Ota_OnWriteBootReq(const uint8_t *req, uint16_t len);      /* 0x2E F190
  * @retval 写入 resp 的字节数；0 表示该 DID 不归 OTA 管（调用方回 NRC 0x31） */
 uint16_t Ota_ReadDid(uint16_t did, uint8_t *resp, uint16_t respMax);
 
+/* 【2026-10-18】是否有 OTA 下载/传输正在进行。
+ * 供主循环里的"可让路"任务（如软 SPI 刷屏）判断是否应跳过本拍 ——
+ * 本工程 CAN 是主循环轮询、硬件 RX FIFO 仅 3 项，任何数十毫秒的阻塞
+ * 都会丢 ISO-TP 连续帧。 */
+bool Ota_IsDownloading(void);
+
 /* 供 console.c 的 "ota" 命令打印状态用 */
 void     Ota_PrintStatus(void);
 

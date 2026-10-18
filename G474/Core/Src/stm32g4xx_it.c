@@ -117,6 +117,20 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
+  /* 【2026-10-12】先把异常栈帧里的 fault PC 打出来 —— 这是唯一能定位到
+   * "哪条指令出的错"的信息。
+   * 背景：排查 USB CDC 时的 MemManage 故障，CFSR/HFSR 全为 0，光看它们
+   * 完全无从下手；而栈帧里被硬件压入的 PC 是确定性的证据。
+   * 顺序要点：**必须先取 sp 再调用任何函数**，否则栈会被下面的打印调用
+   * 覆盖，帧就找不到了。 */
+  {
+    uint32_t exc_return;
+    uint32_t sp;
+
+    __ASM volatile ("mov %0, lr" : "=r" (exc_return));
+    sp = ((exc_return & 0x4U) != 0U) ? __get_PSP() : __get_MSP();
+    BSP_UART_PrintExcFrame(sp);
+  }
   BSP_UART_FaultDump("MEMMANAGE FAULT");
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
@@ -201,7 +215,25 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
+  /* 【2026-10-12】主循环阶段 1ms 采样（停摆定位，定位后可删）。
+   * 主循环每次进任务前更新 g_loopStage；这里每 1ms 采一次并存下"已持续
+   * 多久没变"。若 age 超过 2500ms 而循环没有推进，即可判定卡死在
+   * g_loopStageSample 对应的任务里。 */
+  {
+    extern volatile uint8_t  g_loopStage;
+    extern volatile uint8_t  g_loopStageSample;
+    extern volatile uint32_t g_loopStageAge;
 
+    if (g_loopStageSample != g_loopStage)
+    {
+      g_loopStageSample = g_loopStage;
+      g_loopStageAge    = 0U;
+    }
+    else
+    {
+      g_loopStageAge++;
+    }
+  }
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
@@ -231,11 +263,24 @@ void FDCAN2_IT0_IRQHandler(void)
 {
   g_fdcanIsrCnt++;
 
-  if ((g_fdcanIsrCnt <= 3U) || ((g_fdcanIsrCnt % 1000U) == 0U))
-  {
-    BSP_UART_EmergencyHex("[isr] fdcan entry cnt=", g_fdcanIsrCnt);
-  }
-
+  /* ⚠️【2026-10-11 修复】此处**禁止**做任何串口输出。
+   *
+   * 原先写了 `BSP_UART_EmergencyHex(...)`（前 3 次 + 每 1000 次）：
+   *   BSP_UART_EmergencyPuts 是"逐字符轮询直写 USART1->TDR"的阻塞式发送，
+   *   每个字符最多空转 200000 次等 TXE。FDCAN2 中断优先级为 1（高于 SysTick），
+   *   在中断上下文里做这种阻塞 IO 会：
+   *     ① 把 ISR 时长从微秒级拉到毫秒级；
+   *     ② 与主循环的 Console/BootMark 争用同一个 TDR，输出互相踩踏；
+   *     ③ 中断频繁时主循环被整体饿死。
+   *   计数 g_fdcanIsrCnt 仍保留，用 SWD 直接读即可，不需要打印。
+   *
+   * ⚠️【2026-10-12】本 ISR 已**整体停用**：hal_msp.c 改为
+   *   HAL_NVIC_DisableIRQ(FDCAN2_IT0_IRQn)，CAN 收发全部走 CAN_Task 轮询。
+   *   停用原因：板上 SWD 冻结态抓到 PC 停在弱桩 `E7FE` 死循环、IPSR=102(=IRQ86)、
+   *   而本函数体一次都没执行过 → 首次服务落入弱桩别名后永不返回，
+   *   高优先级 IRQ 饿死 SysTick → 3s IWDG 复位 → 无限循环。
+   *   本函数保留仅为 ISR 路径兜底，**不要**重新 Enable 该 IRQ。
+   */
   HAL_FDCAN_IRQHandler(&hfdcan2);
 }
 

@@ -337,9 +337,9 @@
             <v6Rtti>0</v6Rtti>
             <VariousControls>
               <MiscControls></MiscControls>
-              <Define>USE_HAL_DRIVER,STM32G474xx,USER_VECT_TAB_ADDRESS,VECT_TAB_OFFSET=0xC080</Define>
+              <Define>USE_HAL_DRIVER,STM32G474xx,USER_VECT_TAB_ADDRESS,VECT_TAB_OFFSET=0xC080,CAN_NODE_ROLE=CAN_NODE_A,APP_BOARD_FP=FP_A1,OTA_CLIENT_ENABLE=1</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32G4xx_HAL_Driver/Inc;../Drivers/STM32G4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32G4xx/Include;../Drivers/CMSIS/Include;..\Drivers\User\Inc;..\..\ota\common</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32G4xx_HAL_Driver/Inc;../Drivers/STM32G4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32G4xx/Include;../Drivers/CMSIS/Include;..\Drivers\User\Inc;..\..\ota\common;..\Middlewares\ST\STM32_USB_Device_Library\Core\Inc;..\Middlewares\ST\STM32_USB_Device_Library\Class\CDC\Inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -513,6 +513,23 @@
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_iwdg.c</FilePath>
             </File>
+            <!-- 【2026-10-12】USB 设备控制器（PCD + LL）+ CDC 类，用于把控制台
+                 从板载 CH340K 迁到 MCU 原生 USB（PA11/PA12）。 -->
+            <File>
+              <FileName>stm32g4xx_hal_pcd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pcd.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32g4xx_hal_pcd_ex.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_pcd_ex.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32g4xx_ll_usb.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_ll_usb.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -572,6 +589,56 @@
               <FileName>ota_tunnel.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Drivers\User\Src\ota_tunnel.c</FilePath>
+            </File>
+            <File>
+              <FileName>ota_client.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\User\Src\ota_client.c</FilePath>
+            </File>
+            <File>
+              <FileName>ota_image_data.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\User\Src\ota_image_data.c</FilePath>
+            </File>
+            <File>
+              <FileName>usb_cdc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\User\Src\usb_cdc.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_conf.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\User\Src\usbd_conf.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_desc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drivers\User\Src\usbd_desc.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Middlewares/USB_Device_Library</GroupName>
+          <Files>
+            <File>
+              <FileName>usbd_core.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Middlewares\ST\STM32_USB_Device_Library\Core\Src\usbd_core.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_ctlreq.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Middlewares\ST\STM32_USB_Device_Library\Core\Src\usbd_ctlreq.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_ioreq.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Middlewares\ST\STM32_USB_Device_Library\Core\Src\usbd_ioreq.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_cdc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Middlewares\ST\STM32_USB_Device_Library\Class\CDC\Src\usbd_cdc.c</FilePath>
             </File>
           </Files>
         </Group>

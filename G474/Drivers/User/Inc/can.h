@@ -156,6 +156,11 @@ typedef struct
 #define CAN_DIAG_STAGE_INIT_DONE   3U   /* CAN_Init 已返回 */
 #define CAN_DIAG_STAGE_SELFTEST    4U   /* 自检已完成 */
 
+/* 【2026-10-18】把 FDCAN RX FIFO0 里已到达的帧搬进软件环形缓冲。
+ * 供"无法调用 CAN_Task 的阻塞循环"主动泵用（如 UART 等待、Flash 编程）。
+ * CAN 未初始化时安全返回。 */
+void CAN_PumpRx(void);
+
 extern CAN_DiagSnap_t g_canDiag;
 
 /* 【2026-10-18】发送停滞看门狗触发次数：>0 说明总线曾长时间无法送达帧

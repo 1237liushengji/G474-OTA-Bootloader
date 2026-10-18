@@ -596,6 +596,22 @@ static void CAN_PollErrorStatus(void)
   }
 }
 
+/**
+  * @brief  主动泵一次 CAN 接收（供阻塞循环调用）
+  * @note   本工程 CAN 走主循环轮询，而 HAL 把硬件 RX FIFO0 固定为 3 项
+  *         （SRAMCAN_RF0_NBR=3，vendor 文件不可改）。任何长时间阻塞的循环
+  *         （UART 打印、Flash 编程）都会让后续到达的帧挤爆硬件 FIFO 而丢失。
+  *         在那些循环里插入本函数即可把帧及时搬进 16 项软件环形缓冲。
+  */
+void CAN_PumpRx(void)
+{
+  if (hfdcan2.Instance == NULL)                  /* CAN 尚未初始化（早期启动日志） */
+  {
+    return;
+  }
+  CAN_PollRxFifo0();
+}
+
 void CAN_Task(void)
 {
   /* ---- 轮询路径（替代原 FDCAN2_IT0 中断）---- */

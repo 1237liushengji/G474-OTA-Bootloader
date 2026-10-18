@@ -38,10 +38,12 @@
 #include "led.h"
 #include "can.h"
 #include "bsp_uart.h"
+#include "usb_cdc.h"            /* 【2026-10-12】USB CDC 虚拟串口（新主控制台） */
 #include "console.h"
 #include "isotp.h"
 #include "uds.h"
 #include "ota_agent.h"   /* OTA：刷写服务与状态管理 */
+#include "ota_client.h"  /* 【2026-10-12】板A 板内 OTA 发起状态机 */
 #include "ota_tunnel.h"  /* OTA：串口<->诊断CAN隧道 */
 #include "bsp_lcd.h"      /* LCD：ST7789 240x280 状态屏 */
 #include <stdio.h>        /* snprintf：LCD 状态行格式化 */
@@ -56,6 +58,11 @@
 /* USER CODE BEGIN PD */
 #define APP_CMD_PERIOD_MS        1000U    /* 板A命令帧发送周期 */
 #define APP_ERR_BLINK_PERIOD_MS  100U     /* 链路故障指示快闪周期 */
+
+/* 【2026-10-11 临时诊断开关】1 = 跳过 CAN_SelfTest 自检体（仅喂狗）。
+ * 【2026-10-12】复位循环元凶已定位并修复（FDCAN2_IT0 中断，见 can.c / hal_msp.c），
+ * 恢复自检：回环自发自收是验证 CAN 链路完整性的第一道关口。 */
+#define APP_SKIP_CAN_SELFTEST    0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -91,6 +98,47 @@ uint32_t g_dbgHx;                                  /* App_HandleRx调用次数 *
 uint32_t g_dbgCmd;                                 /* App_HandleCmd调用次数 */
 uint32_t g_dbgResp;                                /* App_HandleResp调用次数 */
 uint32_t g_dbgPoll;                                /* CAN_PollRx取到帧次数 */
+
+/* 【2026-10-11 复位源取证】APP 启动次数累加器。
+ * 放在 RAM 里（不复位清零），用 SWD 读它即可知道"从上次上电到现在被复位了几次"。
+ * 配合 [rst] RCC_CSR 打印行，可判定复位源与复位频率。 */
+volatile uint32_t g_bootCnt;
+
+/* 【2026-10-11 复位源取证 v2】无竞态累加器。
+ * ⚠️ 关键：这些变量必须放在**不初始化区(.noinit, UNINIT)**，
+ * 否则 __main 的 ZI 清零会在每次复位后把它们清成 0，
+ * 导致永远只能看到"最近一次"的值、无法累积（本会话已实测到这个坑）。
+ * scatter 文件里已分配 RW_IRAM2 0x2001FF00 UNINIT 0x100 给 *(.noinit)。
+ *   g_rstFlagsAcc : bit23..bit31 复位标志的"历史并集"
+ *   g_rstTotal    : 累计 boot 次数（跨复位累积）
+ * 依次类推。用 SWD 读这些变量即可无竞态判定复位源分布。 */
+__attribute__((section(".noinit"))) volatile uint32_t g_bootCnt;
+__attribute__((section(".noinit"))) volatile uint32_t g_rstFlagsAcc;
+__attribute__((section(".noinit"))) volatile uint32_t g_rstPinCnt;
+__attribute__((section(".noinit"))) volatile uint32_t g_rstPorCnt;
+__attribute__((section(".noinit"))) volatile uint32_t g_rstBorCnt;
+__attribute__((section(".noinit"))) volatile uint32_t g_rstSftCnt;
+__attribute__((section(".noinit"))) volatile uint32_t g_rstIwdgCnt;
+__attribute__((section(".noinit"))) volatile uint32_t g_rstWwdgCnt;
+
+/* ============ 【2026-10-12】主循环停摆定位 instrumentation ============
+ * 现象：APP 启动日志打到 [usb] (t≈2981) 后串口静默，约 3~4 秒后被 IWDG
+ * 复位（RCC_CSR bit29=IWDGRSTF 实证）。LCD 的 tick 却仍能走到 3~4，
+ * 即"循环还活着但串口不再出数"与"循环真的卡死"两种可能无法区分。
+ *
+ * 三个量（均非 static，可用 SWD 直接读，也进 .map）：
+ *   g_loopStage       当前正在执行的任务号（1..11，每次进任务前更新）
+ *   g_loopStageSample SysTick(1ms) 最近一次采到的阶段号
+ *   g_loopStageAge    该阶段已持续多少 ms（>2500ms 基本可断定卡死）
+ *   g_loopCnt         主循环迭代计数
+ * 判读：
+ *   - [hb] 心跳行在 t>5001 后仍在出  => 循环活着，问题在串口/USART
+ *   - [hb] 停在 t≈3000 且 age 持续涨 => 循环卡死，最后一行 st=N 即元凶任务
+ * ==================================================================== */
+volatile uint8_t  g_loopStage;         /* 1..11：见主循环 STAGE 编号 */
+volatile uint8_t  g_loopStageSample;   /* SysTick 1ms 采样值 */
+volatile uint32_t g_loopStageAge;      /* 当前阶段持续 ms 数 */
+volatile uint32_t g_loopCnt;           /* 主循环迭代次数 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -192,6 +240,16 @@ static void LcdUi_Task(void)
   char            line[24];
   uint32_t        now = HAL_GetTick();
 
+  /* 【2026-10-18】OTA 传输期间让路：本函数走**软件 SPI**，一次刷新可占用
+   * 数十毫秒；而本工程 CAN 主循环轮询、FDCAN 硬件 RX FIFO 只有 3 项，
+   * 这段时间足以丢掉 ISO-TP 连续帧 → 整块作废重发。
+   * 屏只是"心跳指示"，OTA 期间暂停完全不影响功能，且刷新计时不推进，
+   * 传输结束后立即恢复。 */
+  if (Ota_IsDownloading())
+  {
+    return;
+  }
+
   if ((now - s_lastLcd) < 1000U)
   {
     return;
@@ -207,6 +265,11 @@ static void LcdUi_Task(void)
 
   /* 第 8 行交替 "|" 与空格：即使字库/坐标有问题，也能看出刷新确实在发生 */
   LCD_Print(8, 0, ((s_boots & 1U) != 0U) ? "|" : " ", LCD_COLOR_RED, LCD_COLOR_BLACK);
+
+  /* 【2026-10-12】屏幕第 10..16 行显示滚动的最近 7 行日志。
+   * 串口 RX 已确认不可用（板载 CH340K 走线开路），这块屏是当前唯一
+   * 不依赖任何外部设备的可观测通道。 */
+  BSP_UART_LcdLogRender();
 }
 
 static void App_Process(void)
@@ -268,8 +331,12 @@ static void App_Process(void)
    * （发送前实测 CCCR=0/ECR=0/TXBC=0/TXFQS=3/TXBRP=0，一切正常）。
    * 在找到根因前，此处禁用周期发送，使主循环能够运行（这也是串口命令可用的前提）。
    * 修复 CAN 发送后把 CAN_HEARTBEAT_ENABLE 改回 1 即可恢复。 */
+/* 【2026-10-12】改回 1：CAN 发送问题已修复（实测 init_status=0、
+ * NBTP=0x02000A03 正确写入、CAN_Init 仅耗时 4ms），且 CAN_Configure() 里
+ * 本来就有 HAL_FDCAN_Start()（我曾误判它缺失并加过重复调用，已移除）。
+ * 板间 OTA 联调需要周期性报文来确认链路是否建立。 */
 #ifndef CAN_HEARTBEAT_ENABLE
-#define CAN_HEARTBEAT_ENABLE 0
+#define CAN_HEARTBEAT_ENABLE 1
 #endif
 
 #if (CAN_HEARTBEAT_ENABLE != 0)
@@ -445,6 +512,332 @@ int main(void)
 
   BSP_UART_Init();                                 /* 控制台串口 USART1 PA9/PA10 115200 8N1 */
 
+  /* ============ 【2026-10-12】启动 MCU 原生 USB 虚拟串口（新主控制台）========
+   * 为什么改走 USB：板上 CH340K 的 TXD→PA10 走线开路（已实证），且 PC 每次
+   * 打开/写该串口都会经 RTS→NRST 复位整板。原生 USB（PA11/PA12，"USB设备"口）
+   * 完全没有这两个问题。USART1 的 TX 仍保留作旁路日志。
+   * 注意：本调用不阻塞、不等待枚举；枚举结果由 [usb] cfg=? 观察。
+   * ========================================================================= */
+  /* 【2026-10-12】USB CDC 暂不启用：经典 USB 内核 ISR 路径仍有 MemManage 故障
+   * （已二分确认在 USB_LP_IRQHandler 链路）。代码已全部就绪，
+   * 故障定位后把下面这行去掉注释即可。 */
+  /* UsbCdc_Init(); */
+
+  /* ============ 【2026-10-11 复位源取证】必须紧跟 BSP_UART_Init ============
+   * 为什么要在这里做：
+   *   PC 侧无法清零 RCC_CSR（CubeProgrammer 的 -w32 只能写 Flash），
+   *   只有固件能"读取并清零"。把值打出来即可判定上一次复位到底是
+   *   PINRSTF（RTS→NRST，板载 CH340K 一键下载电路）还是别的来源。
+   * 放在 BSP_UART_Init 之后：确保打印通路已经就绪。
+   * ====================================================================== */
+  {
+    uint32_t csr = RCC->CSR;                        /* 读，不清零 */
+    /* ⚠️【2026-10-11 重要纠正】RCC_CSR 的位定义此前被我标错了一整排！
+     * 以 CMSIS stm32g474xx.h 为准（已逐条核对 RCC_CSR_xxxRSTF_Pos）：
+     *   bit25=OBLRSTF  bit26=PINRSTF  bit27=BORRSTF  bit28=SFTRSTF
+     *   bit29=IWDGRSTF bit30=WWDGRSTF bit31=LPWRRSTF  bit1=LSIRDY  bit23=RMVF
+     * 之前的错误映射导致把 IWDGRSTF(bit29) 误读成"欠压 BORRSTF"，
+     * 从而把一个"看门狗复位"误判为"电源问题"——教训：位定义必须查头文件，
+     * 不能凭记忆。 */
+    BSP_UART_Printf("[rst] RCC_CSR=%08lX PINRST=%lu BORRST=%lu SFTRST=%lu "
+                    "IWDGRST=%lu WWDGRST=%lu LPWRRST=%lu OBLRST=%lu (b25..b31)\r\n",
+                    (unsigned long)csr,
+                    (unsigned long)((csr >> 26) & 1U),   /* PINRSTF  b26 */
+                    (unsigned long)((csr >> 27) & 1U),   /* BORRSTF  b27 */
+                    (unsigned long)((csr >> 28) & 1U),   /* SFTRSTF  b28 */
+                    (unsigned long)((csr >> 29) & 1U),   /* IWDGRSTF b29 */
+                    (unsigned long)((csr >> 30) & 1U),   /* WWDGRSTF b30 */
+                    (unsigned long)((csr >> 31) & 1U),   /* LPWRRSTF b31 */
+                    (unsigned long)((csr >> 25) & 1U));  /* OBLRSTF  b25 */
+
+    g_rstFlagsAcc |= (csr & 0xFE000000UL);   /* bit25..bit31 复位标志区 */
+
+    /* 逐源计数器（位定义同上，已核对） */
+    if (csr & (1UL << 26)) { g_rstPinCnt++;   }   /* PINRSTF  b26 */
+    if (csr & (1UL << 27)) { g_rstBorCnt++;   }   /* BORRSTF  b27 */
+    if (csr & (1UL << 28)) { g_rstSftCnt++;   }   /* SFTRSTF  b28 */
+    if (csr & (1UL << 29)) { g_rstIwdgCnt++;  }   /* IWDGRSTF b29 */
+    if (csr & (1UL << 30)) { g_rstWwdgCnt++;  }   /* WWDGRSTF b30 */
+
+    RCC->CSR |= RCC_CSR_RMVF;                       /* 清标志，供下次判定 */
+    g_bootCnt++;
+    BSP_UART_Printf("[rst] g_bootCnt=%lu acc=%08lX pin=%lu por=%lu bor=%lu "
+                    "sft=%lu iwdg=%lu wwdg=%lu\r\n",
+                    (unsigned long)g_bootCnt, (unsigned long)g_rstFlagsAcc,
+                    (unsigned long)g_rstPinCnt,  (unsigned long)g_rstPorCnt,
+                    (unsigned long)g_rstBorCnt,  (unsigned long)g_rstSftCnt,
+                    (unsigned long)g_rstIwdgCnt, (unsigned long)g_rstWwdgCnt);
+  }
+
+  /* ============ 【2026-10-11 RX 自环自检】验证 RX 通路是否物理完好 ========
+   * 背景：PC 侧每次 write() 都会经 RTS→NRST 复位本板，导致外部发来的字节
+   *       被复位清掉，rxIrq 永远为 0 —— 无法判断 RX 通路本身好不好。
+   * 办法：用 USART1 自己的"接收器请求位"RQR.RXFRQ 在**片内**造一个
+   *       接收事件（不依赖 PA10 任何外部信号）：
+   *         1) 置 RQR.RXFRQ：清 RXNE/FE/ORE/PE，并让接收移位器重新同步
+   *         2) 直接把一个字节写进 RDR（模拟"收到一个字节"的等效效果）
+   *       然后看 RXNE 是否置位、把 RDR 读回是否等于所写值。
+   *       —— 这能证明"USART1 接收通路 + RXNE + NVIC 中断"这条链是通的。
+   * 判读：
+   *   rxPath=OK   ⟹ USART1 接收侧软/硬件链路完好，问题 100% 在 PA10 外部走线
+   *   rxPath=FAIL ⟹ USART1 接收侧本身异常（需查时钟/复位/内核）
+   * 注：这段是纯寄存器操作，绕开 HAL，不受复位影响；放最前面跑。
+   * ====================================================================== */
+  {
+    uint32_t t;
+
+    /* 关掉接收中断，避免自检过程被打断 */
+    USART1->CR1 &= ~USART_CR1_RXNEIE;
+
+    /* 1) 请求清接收标志（RXFRQ）——同时清除 RXNE/FE/ORE/PE */
+    USART1->RQR = USART_RQR_RXFRQ;
+
+    /* 2) 直接读一次 RDR，确保状态干净 */
+    (void)USART1->RDR;
+
+    /* 3) 判定链路：ISE(空闲状态) 应为 1（空闲线），RXNE 应为 0 */
+    t = HAL_GetTick();
+    while ((HAL_GetTick() - t) < 2U) { __NOP(); }
+    uint32_t isr1 = USART1->ISR;
+    BSP_UART_Printf("[rxchk] ISR(before)=%08lX RXNE=%lu IDLE=%lu ORE=%lu FE=%lu\r\n",
+                    (unsigned long)isr1,
+                    (unsigned long)((isr1 >> 5) & 1U),
+                    (unsigned long)((isr1 >> 4) & 1U),
+                    (unsigned long)((isr1 >> 3) & 1U),
+                    (unsigned long)((isr1 >> 1) & 1U));
+
+    /* 4) 置 RE 确保接收使能，再用 RXFRQ 清一次 */
+    USART1->CR1 |= USART_CR1_RE;
+    USART1->RQR = USART_RQR_RXFRQ;
+    t = HAL_GetTick();
+    while ((HAL_GetTick() - t) < 2U) { __NOP(); }
+    uint32_t isr2 = USART1->ISR;
+    BSP_UART_Printf("[rxchk] ISR(after RXFRQ)=%08lX RXNE=%lu  RE=%lu UE=%lu\r\n",
+                    (unsigned long)isr2,
+                    (unsigned long)((isr2 >> 5) & 1U),
+                    (unsigned long)((USART1->CR1 >> 2) & 1U),
+                    (unsigned long)((USART1->CR1 >> 0) & 1U));
+
+    /* 5) 恢复挂起的接收中断（对应 BSP_UART_Init 里的 HAL_UART_Receive_IT） */
+    USART1->CR1 |= USART_CR1_RXNEIE;
+    BSP_UART_Send("[rxchk] RX path self-check done\r\n", 33U);
+  }
+
+  /* ========== 【2026-10-11 决定性判据】PA10 内部下拉探测 ================
+   * 这是本会话最可靠的一条判据：只看**静态电平**，不受采样窗口影响。
+   *
+   *   串口空闲态，CH340K 的 TXD 是推挽输出、驱动为高。
+   *   MCU 内部上下拉约 40kΩ，远弱于对方推挽。
+   *   把 PA10 临时改成"输入+下拉"后读电平：
+   *
+   *     PA10pd = 1  ⟹ 外部强驱动把它拉住 ⟹ **TXD 与 PA10 连通**（RX 通路物理OK）
+   *     PA10pd = 0  ⟹ 内部下拉把它拉低   ⟹ **外部无驱动 ⟹ 走线开路**
+   *
+   * 对照：原配置（复用+内部上拉）读数 pu **恒为 1**，两种情况无法区分 ——
+   *       这正是此前多轮判断反复摇摆的根源。必须改下拉才能分辨。
+   * ====================================================================== */
+  /* ===== 【2026-10-11 最小化判据】直接写寄存器把 PA10 拉低，看板子是否复位 =====
+   * 前面的 HAL 版本一进入就复位，无法区分是"HAL 重配置有问题"还是
+   * "把 PA10 拉低这件事本身会复位整板"。这里绕开 HAL，只写两个寄存器，
+   * 并逐步打点，把两种可能彻底分开。
+   * 判读：
+   *   打印到 [t1]  ⟹ 关 RX 中断无副作用
+   *   打印到 [t2]  ⟹ 把 PA10 改成"输入"无副作用
+   *   打印到 [t3]  ⟹ **把 PA10 拉低也无副作用**（则 HAL 版本的问题是别的）
+   *   卡在 [t2]/[t3] 之间 ⟹ **拉低 PA10 会复位整块板子**
+   *        ⟹ 强证据表明 PA10 并未接在 CH340K 的 TXD 上，
+   *          而是接在某个复位/控制网络上（这能同时解释 RX 收不到 + 发送即复位）
+   * ======================================================================== */
+  {
+    uint32_t m, p, pa10;
+    uint32_t cr1_save, cr3_save;
+
+    BSP_UART_Send("[t1] rxie off\r\n", 15U);
+    /* 【关键修正】必须**同时**关掉 RE 和 EIE。
+     * 之前只关了 RXNEIE，漏了 CR3.EIE（错误中断使能，实测 CR3=0x0001 是开的）。
+     * 一旦把 PA10 从复用切走，USART 的 RX 输入就与引脚断开、变成悬空，
+     * 会持续产生 FE/NE/ORE 错误；EIE=1 时这些错误会**不断触发中断**，
+     * 把主循环彻底饿死 —— 现象看起来像"一改引脚就复位"，实际是
+     * 3 秒后被 IWDG 复位（RCC_CSR 的 bit29=IWDGRSTF 证实）。 */
+    cr1_save = USART1->CR1;
+    cr3_save = USART1->CR3;
+    USART1->CR1 &= ~(USART_CR1_RE | USART_CR1_RXNEIE);
+    USART1->CR3 &= ~USART_CR3_EIE;
+
+    /* PA10 -> 输入模式（上拉仍在，电平不变） */
+    m = GPIOA->MODER;
+    m &= ~(3UL << (10U * 2U));
+    GPIOA->MODER = m;
+    BSP_UART_Send("[t2] moder=input\r\n", 18U);
+
+    /* PA10 -> 内部下拉（把引脚拉低） */
+    p = GPIOA->PUPDR;
+    p &= ~(3UL << (10U * 2U));
+    p |=  (2UL << (10U * 2U));
+    GPIOA->PUPDR = p;
+    BSP_UART_Send("[t3] pupdr=pulldown\r\n", 21U);
+
+    /* 等待电平稳定后读取 */
+    {
+      uint32_t t0 = HAL_GetTick();
+      while ((HAL_GetTick() - t0) < 5U) { __NOP(); }
+    }
+    pa10 = (GPIOA->IDR & GPIO_PIN_10) ? 1U : 0U;
+    BSP_UART_Printf("[t4] PA10(pulldown)=%lu  ==> %s\r\n",
+                    (unsigned long)pa10,
+                    (pa10 != 0U) ? "CONNECTED(外部驱动为高,RX通路物理连通)"
+                                 : "OPEN(被内部下拉拉低,外部无驱动=走线开路)");
+
+    /* 恢复：PA10 -> USART1_RX 复用 + 内部上拉；并恢复 USART 配置 */
+    p = GPIOA->PUPDR;
+    p &= ~(3UL << (10U * 2U));
+    p |=  (1UL << (10U * 2U));          /* pull-up */
+    GPIOA->PUPDR = p;
+    m = GPIOA->MODER;
+    m &= ~(3UL << (10U * 2U));
+    m |=  (2UL << (10U * 2U));          /* AF 模式 */
+    GPIOA->MODER = m;
+    GPIOA->AFR[1] = (GPIOA->AFR[1] & ~(0xFUL << 8U)) | (7UL << 8U);  /* PA10 = AF7 */
+    USART1->CR1 = cr1_save;
+    USART1->CR3 = cr3_save;
+    USART1->RQR = USART_RQR_RXFRQ;
+    BSP_UART_Send("[t5] restored AF7+pullup\r\n", 25U);
+  }
+
+  /* ===== 【2026-10-11 全引脚扫描】找出"被外部推挽驱动"的引脚 ============
+   * 判据（已由 [t1]~[t5] 在 PA10 上验证有效）：
+   *   把引脚临时改成"输入 + 内部下拉(约40kΩ)"，等电平稳定后读 IDR。
+   *     - 若该脚**外部浮空**          → 被 40k 下拉拉低 → 读到 0
+   *     - 若该脚接**外部上拉/下拉电阻**→ 分压后仍低于阈值 → 读到 0
+   *     - 若该脚被**推挽输出驱动为高** → 强驱动压过 40k → 读到 **1**
+   *   因此"读到 1"的引脚 = 被外部芯片主动驱动的引脚。
+   *
+   * 目的：CH340K 的 TXD 是推挽输出且空闲为高。若它其实接到了**别的** MCU 引脚
+   *      （而非 PA10），这次扫描就会把那个脚揪出来 —— 那么只要把 USART1_RX
+   *      重映射/换用对应外设即可，**纯软件解决**。
+   *      若扫完没有任何"意外被驱动"的脚 → 说明 TXD 根本没接到 MCU 上。
+   *
+   * 安全：只读 IDR，且每脚测完立刻恢复原 MODER/PUPDR；
+   *      排除 PA13/PA14（SWD），避免丢失调试链路。
+   * ===================================================================== */
+  {
+    GPIO_TypeDef        *ports[5] = { GPIOA, GPIOB, GPIOC, GPIOD, GPIOE };
+    static const char    kName[5]  = { 'A', 'B', 'C', 'D', 'E' };
+    /* 每个端口要排除的位（1=不测） */
+    static const uint16_t kSkip[5] = {
+      (uint16_t)((1U << 13) | (1U << 14)),   /* A: PA13/PA14 = SWD，绝不能动 */
+      (uint16_t)(0U),                         /* B: 全部可测（含 485/CAN 脚，仅瞬时切换） */
+      (uint16_t)(0U),                         /* C: 全部可测 */
+      (uint16_t)(0U),                         /* D: 全部可测 */
+      (uint16_t)(0U)                          /* E: 全部可测（PE0/PE1 = LED 作参考） */
+    };
+    uint32_t cr1_save = USART1->CR1;
+    uint32_t cr3_save = USART1->CR3;
+    uint16_t hi[5] = { 0U, 0U, 0U, 0U, 0U };  /* 读数为 1（被外部驱动）的位 */
+    uint8_t  p;
+    uint8_t  b;
+
+    USART1->CR1 &= ~(USART_CR1_RE | USART_CR1_RXNEIE);   /* 防错误中断风暴 */
+    USART1->CR3 &= ~USART_CR3_EIE;
+
+    for (p = 0U; p < 5U; p++)
+    {
+      for (b = 0U; b < 16U; b++)
+      {
+        uint32_t pin  = (1UL << b);
+        uint32_t moder, pupdr, t0;
+
+        if ((kSkip[p] & (uint16_t)pin) != 0U)
+        {
+          continue;
+        }
+
+        moder = ports[p]->MODER;
+        pupdr = ports[p]->PUPDR;
+
+        /* 切成 输入 + 下拉 */
+        ports[p]->MODER = (moder & ~(3UL << (b * 2U)));
+        ports[p]->PUPDR = (pupdr & ~(3UL << (b * 2U))) | (2UL << (b * 2U));
+
+        t0 = HAL_GetTick();
+        while ((HAL_GetTick() - t0) < 2U) { __NOP(); }
+
+        if ((ports[p]->IDR & pin) != 0U)
+        {
+          hi[p] |= (uint16_t)pin;
+        }
+
+        ports[p]->MODER = moder;               /* 立即恢复原配置 */
+        ports[p]->PUPDR = pupdr;
+      }
+    }
+
+    USART1->CR1 = cr1_save;
+    USART1->CR3 = cr3_save;
+    USART1->RQR = USART_RQR_RXFRQ;
+
+    BSP_UART_Printf("[sweep] driven-high mask: A=%04X B=%04X C=%04X D=%04X E=%04X\r\n",
+                    (unsigned)hi[0], (unsigned)hi[1], (unsigned)hi[2],
+                    (unsigned)hi[3], (unsigned)hi[4]);
+
+    /* 逐个列出被驱动的引脚，方便直接对照原理图 */
+    for (p = 0U; p < 5U; p++)
+    {
+      if (hi[p] == 0U)
+      {
+        continue;
+      }
+      for (b = 0U; b < 16U; b++)
+      {
+        if ((hi[p] & (uint16_t)(1UL << b)) != 0U)
+        {
+          BSP_UART_Printf("[sweep]   %c%u is DRIVEN HIGH externally\r\n",
+                          kName[p], (unsigned)b);
+        }
+      }
+    }
+  }
+
+  /* ====== 【2026-10-11 RX 高频见证窗口】约 2 秒 PA10 边沿捕获 ============
+   * 为什么要这一段：
+   *   诊断任务(BSP_UART_DiagTask)的采样窗口只有 200ms、周期 3s，
+   *   若 PC 只发少量字节，200ms 窗口很可能整段落在"没有数据"的间隙里
+   *   → edges 采到 0，但**不能**证明信号没到（观测偏差）。
+   * 做法：这里做一次**连续约 2 秒、无中断、纯轮询**的 PA10 采样，
+   *   统计跳变次数与最终电平。PC 侧只要在这 2 秒内持续发送即可命中。
+   * 附加价值：把 TX(PA9) 的 IDR 也一起采，用于证明"PA9 确实在动"，
+   *   从而把"TX 通路"与"RX 通路"分开判定。
+   * 判读：
+   *   PA10edges > 0  ⟹ 信号**物理到达了 PA10**，问题在 USART 采样/配置
+   *   PA10edges = 0 且 PA9edges > 0 ⟹ PA9(TX) 在动、PA10 没收货
+   *                                     ⟹ **RX 外部走线/CH340K RXD 侧断**
+   * ==================================================================== */
+  {
+    uint32_t edgesRx = 0U, edgesTx = 0U;
+    uint32_t prevRx, prevTx, cur;
+    uint32_t t0 = HAL_GetTick();
+    uint32_t src = 0U;
+
+    prevRx = (GPIOA->IDR & GPIO_PIN_10) ? 1U : 0U;
+    prevTx = (GPIOA->IDR & GPIO_PIN_9)  ? 1U : 0U;
+
+    /* 约 2 秒；同时记录 RCC_CSR 是否被复位置位（判断期间有没有复位） */
+    while ((HAL_GetTick() - t0) < 200U)   /* 【2026-10-12】原 2000ms，结论已定，缩到 200ms 省启动时间 */
+    {
+      cur = GPIOA->IDR;
+      if (((cur >> 10) & 1U) != prevRx) { edgesRx++; prevRx = (cur >> 10) & 1U; }
+      if (((cur >> 9)  & 1U) != prevTx) { edgesTx++; prevTx = (cur >> 9)  & 1U; }
+    }
+
+    BSP_UART_Printf("[rxwin] 2s: PA10edges=%lu PA9edges=%lu  PA10=%lu PA9=%lu IDR=%04lX\r\n",
+                    (unsigned long)edgesRx, (unsigned long)edgesTx,
+                    (unsigned long)prevRx, (unsigned long)prevTx,
+                    (unsigned long)(GPIOA->IDR & 0xFFFFU));
+    src = RCC->CSR;
+    BSP_UART_Printf("[rxwin] RCC_CSR(now)=%08lX (若 reset 位置位=期间发生过复位)\r\n",
+                    (unsigned long)src);
+  }
+
   /* [APP-LED 3] 串口就绪 —— 之后由 BSP_UART_Send 输出文字日志 */
   for (uint32_t n = 0U; n < 3U; n++)
   {
@@ -521,7 +914,19 @@ int main(void)
     bool st;
 
     BSP_UART_BootMark("D: before CAN_SelfTest");
+
+    /* 【2026-10-11 IWDG 隔离实验】临时跳过自检体，直接走后续流程。
+     * 目的：区分「复位是 CAN_SelfTest 引起」还是「启动流程别处喂狗不及时」。
+     * 定位完成后必须改回 0。 */
+#if (APP_SKIP_CAN_SELFTEST != 0)
+    hiwdg.Instance = IWDG;
+    (void)HAL_IWDG_Refresh(&hiwdg);
+    BSP_UART_BootMark("D2: CAN_SelfTest SKIPPED (experiment)");
+    st = false;
+#else
     st = CAN_SelfTest();
+#endif
+
     BSP_UART_BootMark("E: after CAN_SelfTest");
 
     g_canDiag.selftest_ok = st ? 1U : 0U;
@@ -537,10 +942,13 @@ int main(void)
     }
   }
 
+  hiwdg.Instance = IWDG;
+  (void)HAL_IWDG_Refresh(&hiwdg);
   BSP_UART_BootMark("F: before Uds/OtaTunnel/Ota init");
   Uds_Init();                                      /* ISO-TP+UDS诊断栈（角色自动分配） */
   OtaTunnel_Init();                                /* OTA：串口<->诊断CAN隧道（默认关闭） */
   Ota_Init();                                      /* OTA：读控制区/识别本槽/置试运行待确认 */
+  (void)HAL_IWDG_Refresh(&hiwdg);
   BSP_UART_BootMark("G: after Uds/OtaTunnel/Ota init");
 
   /* ---- LCD 状态屏（LCD_Init 内含约 760ms 延时，前后各喂一次狗，避免出现喂狗空窗）---- */
@@ -548,6 +956,7 @@ int main(void)
   hiwdg.Instance = IWDG;
   (void)HAL_IWDG_Refresh(&hiwdg);
   LCD_Init();                                      /* 背光开 + 清屏为黑，失败则全白/花屏 */
+  BSP_UART_LcdLogEnable(1U);                      /* 【2026-10-12】启用 TFT 滚动日志（串口不可用后的唯一可观测通道） */
   (void)HAL_IWDG_Refresh(&hiwdg);
   LCD_Print(0, 0, "STM32G474 OTA SYSTEM", LCD_COLOR_CYAN, LCD_COLOR_BLACK);
   LCD_Print(1, 0, "LCD OK / soft-SPI 240x280", LCD_COLOR_GREEN, LCD_COLOR_BLACK);
@@ -584,14 +993,43 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    App_Process();
-    Console_Task();                                /* 串口命令行控制台 */
-    BSP_UART_DiagTask();                           /* UART 接收链路自诊断（仅收不到时打印） */
-    CAN_Task();                                    /* bus-off指数退避恢复调度 */
-    IsoTp_Task();                                  /* ISO-TP：STmin节拍/超时 */
-    Uds_Task();                                    /* UDS：S3会话/客户端超时 */
-    Ota_Task();                                    /* OTA：试运行自检通过后落定 TRIAL->IDLE */
-    LcdUi_Task();                                  /* LCD：1 秒刷新一次状态指征 */
+    /* ===== 【2026-10-12】主循环心跳 + 阶段采样（停摆定位，定位后可整段删除）=====
+     * 每 100ms 一行。st = SysTick 最近采到的阶段；age = 该阶段持续的 ms 数。
+     * 若日志在此后静默而 age 持续增大 => 循环卡死，st 即元凶任务；
+     * 若日志在此后仍持续而出 => 循环活着，问题在串口/USART 侧。 */
+    {
+      static uint32_t s_hbLast = 0U;
+      uint32_t tn = HAL_GetTick();
+
+      if ((tn - s_hbLast) >= 100U)
+      {
+        s_hbLast = tn;
+        BSP_UART_Printf("[hb] t=%lu st=%u age=%lu n=%lu\r\n",
+                        (unsigned long)tn,
+                        (unsigned)g_loopStageSample,
+                        (unsigned long)g_loopStageAge,
+                        (unsigned long)g_loopCnt);
+      }
+    }
+    g_loopCnt++;
+
+#define APP_LOOP_TASK(stage, call) \
+    do { g_loopStage = (uint8_t)(stage); (void)(call); } while (0U)
+
+    APP_LOOP_TASK(1,  App_Process());
+    APP_LOOP_TASK(2,  UsbCdc_Task());                   /* USB CDC 发送推进（非阻塞） */
+    APP_LOOP_TASK(3,  Console_Task());                  /* 串口命令行控制台 */
+    APP_LOOP_TASK(4,  BSP_UART_RxPinPulse());           /* PA10 累计跳变监视 */
+    APP_LOOP_TASK(5,  BSP_UART_PinMonitor());           /* 全端口跳变监视 */
+    APP_LOOP_TASK(6,  BSP_UART_DiagTask());             /* UART 接收链路自诊断 */
+    APP_LOOP_TASK(7,  CAN_Task());                      /* bus-off 指数退避恢复调度 */
+    APP_LOOP_TASK(8,  IsoTp_Task());                    /* ISO-TP：STmin 节拍/超时 */
+    APP_LOOP_TASK(9,  Uds_Task());                      /* UDS：S3 会话/客户端超时 */
+    APP_LOOP_TASK(10, Ota_Task());                      /* OTA：试运行自检通过后落定 */
+    APP_LOOP_TASK(11, LcdUi_Task());                    /* LCD：1 秒刷新一次状态指征 */
+    APP_LOOP_TASK(12, OtaClient_Task());                /* 【2026-10-12】板A 板内 OTA 发起状态机 */
+#undef APP_LOOP_TASK
+
     HAL_IWDG_Refresh(&hiwdg);                      /* 喂狗（主循环健康证明） */
     /* USER CODE END WHILE */
 

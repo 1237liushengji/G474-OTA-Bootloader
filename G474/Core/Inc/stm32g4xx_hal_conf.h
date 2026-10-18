@@ -53,7 +53,11 @@
 /*#define HAL_NAND_MODULE_ENABLED   */
 /*#define HAL_NOR_MODULE_ENABLED   */
 /*#define HAL_OPAMP_MODULE_ENABLED   */
-/*#define HAL_PCD_MODULE_ENABLED   */
+/* 【2026-10-12】启用 USB 设备控制器（PCD）模块。
+ * 目的：把控制台从板载 CH340K 迁到 MCU 原生 USB（PA11/PA12，板上"USB设备"口）。
+ * 原因见 docs/15 §十四：PA10 ↔ CH340K.TXD 走线开路，且 RTS→NRST 会复位整板。
+ * 注意：本工程用自写的最小 CDC-ACM 类，不依赖 ST 的 USB Device Library 中间件。 */
+#define HAL_PCD_MODULE_ENABLED
 /*#define HAL_QSPI_MODULE_ENABLED   */
 /*#define HAL_RNG_MODULE_ENABLED   */
 /*#define HAL_RTC_MODULE_ENABLED   */
