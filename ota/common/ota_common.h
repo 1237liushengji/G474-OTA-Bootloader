@@ -147,8 +147,11 @@
 #endif
 
 /* 镜像头字段偏移（全部小端） */
-#define OTA_IMG_OFF_MAGIC         0U    /* u32 魔数 */
-#define OTA_IMG_OFF_IMG_SIZE      4U    /* u32 整镜像大小 = 32 + payloadSize */
+#define OTA_IMG_OFF_MAGIC         0U    /* u32 魔数（小端存储：落盘字节 54 4F 34 47） */
+#define OTA_IMG_OFF_IMG_SIZE      4U    /* u32 整镜像大小 = **OTA_IMG_HDR_SIZE(0x80) + payloadSize**
+                                         * ⚠️ 不是 "32 + payloadSize"！曾因这句注释误导，
+                                         *    APP 合成头时写成 32+payload，比 BL 要求小 0x60，
+                                         *    导致 FF02 成功但复位后 BL 判 SIZE_RANGE(4) 回退旧槽。 */
 #define OTA_IMG_OFF_PAYLOAD_SIZE  8U    /* u32 净固件字节数 */
 #define OTA_IMG_OFF_VERSION       12U   /* u8 major, u8 minor, u16 保留 */
 #define OTA_IMG_OFF_LOAD_ADDR     16U   /* u32 净固件应写入的绝对地址 */

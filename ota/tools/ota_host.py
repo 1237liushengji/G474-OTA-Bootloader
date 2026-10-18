@@ -91,7 +91,13 @@ TOOL_NAME = "ota_host"
 TOOL_VERSION = "1.0"
 
 # ---- OTA 镜像格式（32 字节小端头）----
-OTA_MAGIC = b"G4OT"                 # [0:4]  0x47 0x34 0x4F 0x54
+# ★【2026-10-18 修复】magic 在 Flash 里是**小端**存储：
+#   固件用 PutU32LE(hdr+0, 0x47344F54)，落盘字节为 54 4F 34 47。
+#   原实现写成 b"G4OT"（= 47 34 4F 54，按 ASCII 顺序），方向正好反了，
+#   于是 --info/--pack 产出的镜像一律被 BL 判 "magic 错误" 拒收。
+OTA_MAGIC_VALUE = 0x47344F54
+OTA_MAGIC = struct.pack("<I", OTA_MAGIC_VALUE)      # -> b"\x54\x4f\x34\x47"
+OTA_MAGIC_NAME = "G4OT"                             # 仅用于人读显示
 OTA_HEADER_SIZE = 0x80
 OTA_OFF_IMG_SIZE = 4                # [4:8]  u32 含整头
 OTA_OFF_APP_SIZE = 8                # [8:12] u32 纯固件
@@ -331,9 +337,11 @@ class OtaImage:
         head[0:4] = OTA_MAGIC
         struct.pack_into("<I", head, OTA_OFF_IMG_SIZE, OTA_HEADER_SIZE + len(app))
         struct.pack_into("<I", head, OTA_OFF_APP_SIZE, len(app))
-        head[OTA_OFF_VERSION] = vmaj
-        head[OTA_OFF_VERSION + 1] = vmin
-        # [14:16] 保留 0；[16:20] loadAddr
+        # ★【2026-10-18 统一】版本按 0xMMmm0000 存（与 make_factory_image.py
+        #   和 ota_common.h 的 slotVersion 编码一致）。
+        #   原实现写成 head[12]=major / head[13]=minor，与工厂镜像的
+        #   [14]=minor / [15]=major 不同字节位，互相解析都会得到 0.0。
+        struct.pack_into("<I", head, OTA_OFF_VERSION, ((vmaj & 0xFF) << 24) | ((vmin & 0xFF) << 16))
         struct.pack_into("<I", head, OTA_OFF_LOAD_ADDR, int(self.load_addr) & 0xFFFFFFFF)
         struct.pack_into("<I", head, OTA_OFF_APP_CRC, crc32(app))
         struct.pack_into("<I", head, OTA_OFF_HDR_CRC, crc32(bytes(head[0:OTA_OFF_HDR_CRC])))
@@ -345,7 +353,7 @@ class OtaImage:
         hdr_crc = struct.unpack_from("<I", self.pack(), OTA_OFF_HDR_CRC)[0]
         return "\n".join([
             "OTA镜像信息",
-            f"  magic    : {OTA_MAGIC.decode('ascii')}",
+            f"  magic    : {OTA_MAGIC_NAME} (0x{OTA_MAGIC_VALUE:08X}, LE bytes {OTA_MAGIC.hex('-')})",
             f"  imgSize  : {self.img_size} 字节(32字节头 + {self.app_size}字节固件)",
             f"  appSize  : {self.app_size} 字节",
             f"  version  : {vmaj}.{vmin}",
@@ -363,8 +371,9 @@ def parse_image(data: bytes) -> OtaImage:
     if data[0:4] != OTA_MAGIC:
         raise ImageFormatError(
             f"magic 错误: {data[0:4].hex(' ')}，应为 {OTA_MAGIC.hex(' ')}('G4OT')")
-    if data[OTA_OFF_RESERVED0:OTA_OFF_RESERVED0 + 2] != b"\x00\x00":
-        raise ImageFormatError("头 [14:16] reserved 必须为 0")
+    # ★【2026-10-18】[14:16] 不要求为 0：该处是 version 低 16 位的承载位，
+    #   make_factory_image.py 会把 minor/major 写进 [14]/[15]（0xMMmm0000）。
+    #   原先这里强制 ==0，导致所有工厂镜像都被判非法（--info 直接报错）。
     if data[OTA_OFF_RESERVED1:OTA_OFF_RESERVED1 + 4] != b"\x00\x00\x00\x00":
         raise ImageFormatError("头 [28:32] reserved 必须为 0")
 
@@ -388,8 +397,10 @@ def parse_image(data: bytes) -> OtaImage:
         raise ImageFormatError(
             f"hdrCrc32 校验失败: 头内 0x{hdr_crc:08X}, 实算 0x{crc32(data[0:OTA_OFF_HDR_CRC]):08X}")
 
-    vmaj = data[OTA_OFF_VERSION]
-    vmin = data[OTA_OFF_VERSION + 1]
+    # ★ 版本按 0xMMmm0000 解（与 pack / make_factory_image.py 一致）
+    ver_u32 = struct.unpack_from("<I", data, OTA_OFF_VERSION)[0]
+    vmaj = (ver_u32 >> 24) & 0xFF
+    vmin = (ver_u32 >> 16) & 0xFF
     load_addr = struct.unpack_from("<I", data, OTA_OFF_LOAD_ADDR)[0]
     return OtaImage(app_data=app, version=(vmaj, vmin), load_addr=load_addr)
 

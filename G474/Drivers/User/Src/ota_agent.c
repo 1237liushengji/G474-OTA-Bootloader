@@ -786,9 +786,11 @@ static bool Ota_SynthImageHeader(uint8_t slot, uint32_t total, uint32_t crc)
    *     只有走 0x34/0x36 之后由设备自己合成的头才是错的。） */
   PutU32LE(&hdr[OTA_IMG_OFF_IMG_SIZE],     OTA_IMG_HDR_SIZE + total);
   PutU32LE(&hdr[OTA_IMG_OFF_PAYLOAD_SIZE], total);
-  /* version 缺省 0（协议允许；后续可经 0x2E DID 下发） */
-  hdr[OTA_IMG_OFF_VERSION + 0U] = 0x00U;
-  hdr[OTA_IMG_OFF_VERSION + 1U] = 0x00U;
+  /* version 缺省 0（协议允许）。★ 必须整 4 字节写干净：
+   * memset 之后该区是 0xFF，若只覆盖 [12][13] 会让 [14][15] 残留 0xFF，
+   * 与 make_factory_image.py / ota_host.py 约定的 0xMMmm0000 编码不一致。
+   * 统一写法：offset 12 处放 u32 版本号（这里取 0.0）。 */
+  PutU32LE(&hdr[OTA_IMG_OFF_VERSION], 0x00000000U);
   PutU32LE(&hdr[OTA_IMG_OFF_LOAD_ADDR],    loadAddr);
   PutU32LE(&hdr[OTA_IMG_OFF_PAYLOAD_CRC],  crc);
   PutU32LE(&hdr[OTA_IMG_OFF_RESERVED],     0x00000000U);
