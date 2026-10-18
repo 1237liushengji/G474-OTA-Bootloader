@@ -1,7 +1,28 @@
-# STM32G474 双机 CAN 总线通信与 UDS 诊断系统
+# STM32G474 双机 CAN 诊断与 A/B 双槽 OTA 升级系统
 
-两块 STM32G474VET6 开发板经 SN65HVD230 收发器接入同一条经典 CAN 总线
-（500 kbit/s），演示从**链路层驱动**到**汽车诊断协议栈**的完整实现：
+两块 STM32G474VET6 开发板经 SN65HVD230 收发器接入同一条经典 CAN 总线（500 kbit/s），
+从**链路层驱动**一路做到**汽车诊断协议栈**，并在其上实现了**可现场升级、刷坏能自恢复**的
+双槽 OTA —— 板 A 是诊断仪兼升级发起方，板 B 是带自研 Bootloader 的被升级 ECU。
+使用 **OBD-II 标准诊断地址对 `0x7E0` / `0x7E8`**，无需额外诊断硬件。
+
+## 核心：Bootloader 与双槽 OTA
+
+| 能力 | 实现 |
+|------|------|
+| **A/B 双槽** | 512 KB Flash 划为 2×208 KB 双槽；刷写目标恒为**非活动槽**，运行槽永不被擦写 |
+| **跳转前四重校验** | 镜像头 CRC + payload CRC32 + 加载地址 + **独立**的栈顶 / 复位向量检查（后者可拦截"CRC 全对但向量落在槽外"的坏镜像） |
+| **试运行与自动回滚** | 激活后 `trialLeft` 由 BL 每次启动递减，新固件 3 s 内未完成自检则自动回退旧槽 |
+| **掉电安全控制区** | 双副本 + 单调 `seq` ping-pong，永远只写较旧那份，掉电最多坏一份 |
+| **完整 UDS 刷写链路** | `0x34 / 0x36 / 0x37 / 0x31(FF01,FF02) / 0x11`，`0x78` responsePending 正确处理 |
+
+实测数据：73.8 KB 镜像 / 74 个数据块，CRC32 一致，数据块重传 **0** 次；
+BL 校验通过后跳转 Slot B（`VTOR = 0x08040880` 且正常运行）；
+构造"未自检确认"场景时，BL 正确打印 `trial exhausted -> rollback to slot 0` 并恢复可用。
+
+> 升级与回滚操作手册（分区表 / 故障码对照 / SOP）：[`docs/16-OTA升级与回滚操作手册.md`](docs/16-OTA升级与回滚操作手册.md)  
+> 换槽升级：`python tools/make_ota_payload.py --target-slot A|B`
+
+## 诊断协议栈
 
 | 层次 | 内容 |
 |------|------|
@@ -10,9 +31,8 @@
 | **传输层** | **自研 ISO-TP（ISO 15765-2）**：SF/FF/CF/FC 完整状态机、SN 序号校验、STmin 节拍、N_Bs/N_Cr 超时、全非阻塞 |
 | **诊断层** | **自研 UDS（ISO 14229）**：`0x10`/`0x19`/`0x22`/`0x2E`/`0x3E` 服务、会话管理与 S3、NRC、DTC 事件合成 |
 
-板 A 扮演**诊断仪**（等价于 CANoe / PCAN-Diag 的角色），板 B 扮演**被诊断的 ECU**，
-使用 **OBD-II 标准诊断地址对 `0x7E0` / `0x7E8`** —— 无需额外诊断硬件，即可完整演示
-UDS 交互，包含**多帧应答的真实分段与流控协商**（FF + FC + CF）。
+板 A 扮演**诊断仪**（等价于 CANoe / PCAN-Diag），板 B 扮演**被诊断的 ECU**，
+可完整演示 UDS 交互，包含**多帧应答的真实分段与流控协商**（FF + FC + CF）。
 
 > 诊断协议栈的设计细节见 [`docs/`](docs/)；驱动调用模式与位时序结构参照 **ST 官方
 > STM32CubeG4 示例** [FDCAN_Classic_Frame_Networking](https://github.com/STMicroelectronics/STM32CubeG4/tree/master/Projects/STM32G474E-EVAL/Examples/FDCAN/FDCAN_Classic_Frame_Networking)
@@ -36,10 +56,6 @@ UDS 交互，包含**多帧应答的真实分段与流控协商**（FF + FC + CF
 10. [ISO-TP 与 UDS 诊断栈](#10-iso-tp-与-uds-诊断栈)
 11. [版本历史](#11-版本历史)
 12. [参考资料](#12-参考资料)
-
-> **OTA 固件升级（双槽 + 试运行回滚）已完整跑通**，操作步骤、故障码表与验收记录见
-> [`docs/16-OTA升级与回滚操作手册.md`](docs/16-OTA升级与回滚操作手册.md)。
-> 换槽升级用 `python tools/make_ota_payload.py --target-slot A|B`。
 
 ---
 
