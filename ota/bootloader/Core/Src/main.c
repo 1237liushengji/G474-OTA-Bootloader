@@ -43,6 +43,33 @@ static uint8_t            s_activeSlot;   /* 活动槽：0=A，1=B */
 static bool               s_recovery;     /* 是否进入 recovery（永不跳转 APP） */
 static bool               s_canOk;        /* CAN 是否已上线 */
 static uint32_t           s_canRetryTick; /* recovery 中 CAN 重试计时 */
+static bool               s_inBootWindow; /* 是否处于启动等待窗口 */
+
+/**
+  * @brief  诊断接收分发（在 BL_DiagDispatch 前加一层启动窗口过滤）
+  *
+  * ★★【2026-10-18 根因修复】启动窗口原先的判据是"收到任一完整诊断请求即 recovery"，
+  *   而 TesterPresent(0x3E) 是**任何上位机都会周期发送的保活帧**（本项目板A 每 2s 一次）。
+  *   于是对端一旦复位，0x3E 几乎必然落进 1s 窗口 → BL 置 recovery 且**永不跳 APP**
+  *   → 对端永远停在 Bootloader，由 bl_diag.c 应答（这正是长期观察到的 7F 34 31 来源），
+  *   OTA 永远无法开始。表现为"对端明明有镜像却一直停在 BL"。
+  *
+  *   正确语义：只有**表达了刷写意图**的请求才把 BL 留下来。
+  *   TesterPresent 属于链路保活，必须静默忽略（既不回应，也不触发 recovery）。
+  */
+static void BL_RxDispatch(const uint8_t *data, uint16_t len)
+{
+  if (s_inBootWindow && (len >= 1U))
+  {
+    if (data[0] == 0x3EU)                       /* TesterPresent：保活帧 */
+    {
+      return;
+    }
+    s_recovery = true;                          /* 其余请求 → 留在 BL */
+  }
+
+  BL_DiagDispatch(data, len);
+}
 
 /*--------------------------------------- 基础服务 ----------------------------------------*/
 /**
@@ -140,12 +167,12 @@ static void BL_HandleTrial(void)
 }
 
 /**
-  * @brief  启动窗口：OTA_BOOT_WINDOW_MS 内等待一个完整诊断请求
+  * @brief  启动窗口：OTA_BOOT_WINDOW_MS 内等待一个"表达刷写意图"的诊断请求
+  * @note   TesterPresent(0x3E) 不在此列 —— 它只是保活帧，见 BL_RxDispatch。
   */
 static void BL_BootWindow(void)
 {
   uint32_t start;
-  uint32_t rxBase;
 
   if (!s_canOk)
   {
@@ -153,8 +180,8 @@ static void BL_BootWindow(void)
     return;
   }
 
-  rxBase = BL_IsoTpGetRxMsgCount();
   start  = HAL_GetTick();
+  s_inBootWindow = true;                        /* ★ 窗口内由 BL_RxDispatch 过滤 0x3E */
 
   while ((HAL_GetTick() - start) < OTA_BOOT_WINDOW_MS)
   {
@@ -167,14 +194,19 @@ static void BL_BootWindow(void)
     BL_IsoTpTask();
     HAL_IWDG_Refresh(&s_hiwdg);
 
-    /* 收到任一完整诊断请求，或已收到 FF 正在收多帧 -> 判定"上位机要进 BL" */
-    if ((BL_IsoTpGetRxMsgCount() > rxBase) || BL_IsoTpRxBusy())
+    /* ★ 只信 s_recovery（由 BL_RxDispatch 判定"是否表达刷写意图"）。
+     *   不能再用 BL_IsoTpGetRxMsgCount()，它在本层已按"收到完整消息"自增，
+     *   TesterPresent 一样会让它 +1，等于把过滤完全绕过。 */
+    if (s_recovery || BL_IsoTpRxBusy())
     {
       s_recovery = true;
       BL_UART_SEND_STR("BL: diag request in boot window -> recovery\r\n");
+      s_inBootWindow = false;
       return;
     }
   }
+
+  s_inBootWindow = false;
 
   /* 窗口超时：非 TRIAL 与 TRIAL 都直接进入跳转判定（TRIAL 不额外等待） */
 }
@@ -516,7 +548,7 @@ int main(void)
   s_canOk = (BL_CanInit() == HAL_OK);
   if (s_canOk)
   {
-    BL_IsoTpInit(BL_DIAG_REQ_ID, BL_DIAG_RESP_ID, BL_DiagDispatch);
+    BL_IsoTpInit(BL_DIAG_REQ_ID, BL_DIAG_RESP_ID, BL_RxDispatch);
     BL_DiagStage(6U, 0U);
   }
   else
@@ -560,7 +592,7 @@ int main(void)
       if (BL_CanInit() == HAL_OK)
       {
         s_canOk = true;
-        BL_IsoTpInit(BL_DIAG_REQ_ID, BL_DIAG_RESP_ID, BL_DiagDispatch);
+        BL_IsoTpInit(BL_DIAG_REQ_ID, BL_DIAG_RESP_ID, BL_RxDispatch);
         BL_UART_SEND_STR("BL: CAN online\r\n");
       }
     }

@@ -9,11 +9,12 @@
   *           PB13 = FDCAN2_TX（AF9，接模块CRX/RXD引脚）
   *           （PB12/PB13为G474的FDCAN2复用引脚，数据手册Table 13）
   *
-  * 位时序（500 kbit/s，采样点80%，与ST官方G474E-EVAL示例结构一致）：
-  *           FDCAN内核时钟 = PCLK1 = 150 MHz
-  *           NominalPrescaler = 30  ->  位量子 tq = 200 ns
-  *           1位 = 10 tq = 2 us     ->  500 kbit/s
-  *           同步段(1) + Seg1(7) + Seg2(2)，采样点 = (1+7)/10 = 80%
+  * 位时序（经典CAN 500 kbit/s，采样点 75%）：
+  *           FDCAN内核时钟 = HSE 8 MHz（见 stm32g4xx_hal_msp.c）
+  *           NominalPrescaler = 1  ->  位量子 tq = 125 ns
+  *           1位 = 16 tq = 2 us     ->  500 kbit/s
+  *           同步段(1) + Seg1(11) + Seg2(4)，采样点 = (1+11)/16 = 75%
+  *           （2026-10-11 修正：此前注释写的是 PCLK1=150MHz / 10tq / 80%，已过时）
   ******************************************************************************
   * @attention
   * 参考实现：STMicroelectronics/STM32CubeG4 官方示例
@@ -38,7 +39,13 @@
 #define CAN_NODE_A                     0
 #define CAN_NODE_B                     1
 
-#define CAN_NODE_ROLE                  CAN_NODE_A    /* <-- 当前编译的节点角色 */
+/* 【2026-10-12】改为可被构建定义覆盖：板间 OTA 需要一块 A(发 UDS 请求)、
+ * 一块 B(收并刷写)。构建板 B 时在 Keil 的 Define 里加
+ *     CAN_NODE_ROLE=CAN_NODE_B   和   APP_BOARD_FP=FP_B2
+ * 即可，无需改源码。注意 Keil 的 <Define> 里不要写带引号的字符串。 */
+#ifndef CAN_NODE_ROLE
+#define CAN_NODE_ROLE                  CAN_NODE_A    /* 默认：节点 A(master) */
+#endif
 
 /* 单板自测试（硬件排错用）：置1后FDCAN进入外部回环模式——本板发出的帧会被
  * 自己收到（0x321按从节点逻辑应答，0x322按主节点逻辑处理），单板即可完成
@@ -100,7 +107,7 @@ const CAN_Stats  *CAN_GetStats(void);
 
 /* 运行时重配置（控制台调用）：
  * 波特率仅支持125k/250k/500k/1M（内部为预计算时序表，保证所有档位
- * 统一10tq/位、采样点80%）；两块板必须同步切换，否则无法互通。
+ * 统一16tq/位、采样点75%）；两块板必须同步切换，否则无法互通。
  * 混杂模式（总线监视sniff）：接收总线上所有ID的报文。 */
 HAL_StatusTypeDef CAN_SetBitrate(uint32_t bitrate);
 HAL_StatusTypeDef CAN_SetPromiscuous(bool enable);
@@ -150,6 +157,10 @@ typedef struct
 #define CAN_DIAG_STAGE_SELFTEST    4U   /* 自检已完成 */
 
 extern CAN_DiagSnap_t g_canDiag;
+
+/* 【2026-10-18】发送停滞看门狗触发次数：>0 说明总线曾长时间无法送达帧
+ * （对端不 ACK / 位时序不匹配 / 总线断开），已被主动 Abort 兜底。 */
+extern volatile uint32_t g_canTxStallAborts;
 void CAN_DiagCapture(uint32_t stage);
 
 /*--------------------------------------- 载荷编解码 --------------------------------------*/

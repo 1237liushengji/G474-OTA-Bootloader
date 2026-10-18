@@ -36,6 +36,11 @@
 #define CAN_BUSOFF_BACKOFF_MIN_MS   1000U             /* bus-off恢复起始退避 */
 #define CAN_BUSOFF_BACKOFF_MAX_MS   30000U            /* bus-off恢复退避上限 */
 
+/* 【2026-10-11 临时诊断开关】1 = CAN_SelfTest 跳过 CAN_Send 调用。
+ * 用于判定 "S2 之后挂死" 是否发生在 CAN_Send / TXBAR 路径。
+ * 定位完成后必须改回 0（或整段删除）。 */
+#define CAN_SELFTEST_SKIP_SEND      0
+
 /*--------------------------------------- 模块内部变量 --------------------------------------*/
 FDCAN_HandleTypeDef hfdcan2;                          /* FDCAN2句柄（中断服务函数引用） */
 
@@ -54,6 +59,23 @@ static uint32_t     s_bitrate = CAN_BITRATE;          /* 当前位速率 */
 
 static volatile uint32_t s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS; /* 当前退避时长 */
 static volatile uint32_t s_busOffDueTick;             /* 待执行的恢复时刻（0=无待恢复） */
+
+/* 【2026-10-18 新增】发送停滞看门狗。
+ * 场景：总线异常使 TEC 升入 error-passive（128~255）但**未达 bus-off(256)**。
+ *   此时 AutoRetransmission=ENABLE 会让未送达的帧无限重传、永久占住 Tx 缓冲，
+ *   于是 HAL_FDCAN_GetTxFifoFreeLevel() 恒为 0 → CAN_Send 恒返回 HAL_BUSY
+ *   → ISO-TP 永远发不出去，整个 OTA 静默死锁。
+ *   已有的 bus-off 恢复（Stop→Start）只在 TEC≥256 时触发，救不了 error-passive。
+ * 对策：FIFO 连续满超过 CAN_TX_STALL_MS 就主动 Abort 全部待发缓冲，
+ *   把"卡住不动的帧"丢掉换回可用空间，让上层按自己的超时逻辑重试。 */
+#define CAN_TX_STALL_MS        500U
+static uint32_t s_txStallSince;                       /* 首次观察到FIFO满的时刻(0=正常) */
+volatile uint32_t g_canTxStallAborts;                 /* 触发中止次数（SWD可读） */
+
+/* 【2026-10-12】轮询接收排空函数的自述声明。
+ * CAN_SelfTest()（回环自检）会用它主动从 RX FIFO0 取帧，
+ * 而其定义位于文件后部，故在此前置声明。 */
+static void CAN_PollRxFifo0(void);
 
 /* 【2026-10-11 新增】无串口诊断快照：SWD 直读 RAM，绕开 P2 串口不可靠的问题。
  * 定义在文件作用域（非 static）以便从 .map 查到地址。 */
@@ -278,37 +300,36 @@ static HAL_StatusTypeDef CAN_Configure(void)
     return status;
   }
 
-  /* 接收新报文 + Tx事件确认 + 总线错误状态中断（V1.2.3中断线由ILS复位值决定，均走中断线0） */
-  status = HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0U);
-  if (status != HAL_OK)
-  {
-    return status;
-  }
-  /* Tx事件确认三件套：
-   * 1) TEFNE：新事件写入通知（排空事件FIFO、对账MessageMarker）；
-   * 2) TX_COMPLETE + BufferIndexes=0x07：使能3个Tx缓冲区的传输完成中断，
-   *    V1.2.3的HAL据此置TXBTIE寄存器——G4精简FDCAN IP在TXBTIE未使能时
-   *    事件FIFO写入处于未授权状态，会导致每次发送误报TEFL（元素丢失）；
-   * 3) TEFL：真实丢失时的告警（正常应为0）。 */
-  status = HAL_FDCAN_ActivateNotification(&hfdcan2,
-                                          FDCAN_IT_TX_EVT_FIFO_NEW_DATA | FDCAN_IT_TX_EVT_FIFO_ELT_LOST,
-                                          0U);
-  if (status != HAL_OK)
-  {
-    return status;
-  }
-  status = HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_TX_COMPLETE, 0x07U);
-  if (status != HAL_OK)
-  {
-    return status;
-  }
-  status = HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_BUS_OFF | FDCAN_IT_ERROR_PASSIVE, 0U);
-  if (status != HAL_OK)
-  {
-    return status;
-  }
+  /* 【2026-10-12 关键修复】不再挂任何 FDCAN 中断，全部改为 CAN_Task 主循环轮询。
+   *
+   * 故障现象：两块板各跑 3~5s 就被 IWDG 复位，串口心跳停在
+   *   [hb] t=5233 st=11 n=348276 —— 主循环停摆 + SysTick 停走。
+   *
+   * 定位过程（板上 SWD 冻结态实测）：
+   *   - PC=0x0800C3BE（`E7FE` = `b .` 死循环，APP 的 Default_Handler 弱桩海）
+   *   - XPSR=0x61000066 → IPSR=102 = 异常号 → IRQ86 = FDCAN2_IT0
+   *   - NVIC IABR[2]=0x00400000（IRQ86 活动）、ISER[2]=0x00400000（已使能）
+   *   - 核心寄存器 SP=0x20003098 处压着完整异常栈帧，xPSR 的 IPSR=0（线程态被抢断）
+   *   - 但 g_fdcanIsrCnt==0 → FDCAN2_IT0_IRQHandler 函数体一次都没执行
+   *   - FDCAN2 ECR=0x0013FC00（REC=124）、PSR=0x0000076A（LEC=2 Form error + EP + EW）
+   *     → CAN 处于 error-passive，错误类中断源持续活跃
+   *
+   * 决定性二分实验（未改任何代码，只在板上写寄存器）：
+   *   复位 -> 等 APP 起来 -> 写 NVIC ICER[2]=0（禁用 IRQ64~95，含 IRQ86）-> 放行
+   * 结果：40 秒串口抓包内心跳一路跑到 t=5234 / n=348291（正是原冻结点），
+   *       主循环稳定 16k 次/秒，全程无复位。→ 确认 IRQ86 即元凶。
+   *
+   * 为何 ISR 不执行却停在 Default_Handler：IRQ86 使能位在 MspInit 里置位，
+   * 而此刻 APP 的 FDCAN2 尚未 Start，中断线一旦来请求即被服务；
+   * 首次服务时 CPU 走的是弱桩别名（0x0800C3BF 一带的 `E7FE` 海），
+   * 进入后永不返回 → 优先级 1 > SysTick 15 → 全系统冻结 → 3s IWDG 复位 → 死循环。
+   *
+   * 规避方式：NVIC 层面禁用（见 hal_msp.c）+ 纯轮询。CAN 负载为板间 OTA
+   * 控制流（数百字节级），轮询完全够用，且彻底消除优先级饥饿风险。 */
+  /* 不调用 HAL_FDCAN_ActivateNotification()；CAN_Task 负责排空 FIFO 与事件。 */
+  hfdcan2.ErrorCode = HAL_FDCAN_ERROR_NONE;      /* 清启动期可能粘滞的错误码 */
 
-  /* 已停机，无RX中断竞争，复位环形缓冲 */
+  /* 已启动，复位接收环形缓冲 */
   s_rxR = 0U;
   s_rxW = 0U;
 
@@ -357,31 +378,71 @@ bool CAN_SelfTest(void)
   }
   BSP_UART_BootMark("S2: after CAN_Configure(loopback)");
 
+  /* 【2026-10-11 二次定位】S2 之后主循环再无任何输出（3s 后 IWDG 复位循环）。
+   * 串口打点会因为"中断风暴饿死主循环"而丢失，故同时把步号写进
+   * g_canDiag.stage —— 它是 .bss 变量，复位后由启动代码清零，
+   * 但程序一旦跑过该点就会留下痕迹；用 SWD 在复位后 1s 左右读取即可
+   * 判读"最后成功走到哪一步"。
+   * 步号分配（与文件顶部的 CAN_DIAG_* 宏无关，这里就地约定）：
+   *   20 = 已过 S2（loopback 配置完成）
+   *   21 = 即将调 CAN_Send
+   *   22 = CAN_Send 已返回
+   *   23 = 进入 RX 轮询
+   *   24 = RX 轮询结束
+   *   25 = 即将恢复 normal 模式
+   *   26 = 已恢复 normal 模式（自检流程走完） */
+  g_canDiag.stage = 20U;
+  BSP_UART_BootMark("S2a: state/TXFQS check");
+
   /* 回环自发自收：内部回环模式下 TX 不入总线，RX 直接收到自己发的帧 */
-  if (CAN_Send(CAN_ID_CMD_A2B, testPayload, CAN_PAYLOAD_LEN) == HAL_OK)
   {
-    start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < 50U)            /* 最长等 50ms，不无限阻塞 */
+    HAL_StatusTypeDef send_st;
+
+#if (CAN_SELFTEST_SKIP_SEND != 0)
+    BSP_UART_BootMark("S2b: SKIP CAN_Send (experiment)");
+    send_st = HAL_ERROR;
+#else
+    g_canDiag.stage = 21U;
+    BSP_UART_BootMark("S2b: before CAN_Send");
+    send_st = CAN_Send(CAN_ID_CMD_A2B, testPayload, CAN_PAYLOAD_LEN);
+    g_canDiag.stage = 22U;
+    BSP_UART_BootMark(send_st == HAL_OK ? "S2c: CAN_Send OK" : "S2c: CAN_Send FAIL");
+#endif
+
+    if (send_st == HAL_OK)
     {
-      if (CAN_PollRx(&msg))
+      g_canDiag.stage = 23U;
+      BSP_UART_BootMark("S3: before rx poll");
+      start = HAL_GetTick();
+      while ((HAL_GetTick() - start) < 50U)          /* 最长等 50ms，不无限阻塞 */
       {
-        if ((msg.id == CAN_ID_CMD_A2B) && (msg.len == CAN_PAYLOAD_LEN))
+        /* 【2026-10-12】中断已停用，回环帧必须由轮询主动从 FIFO0 取出，
+         * 否则 CAN_PollRx 永远看不到数据（环形缓冲由 CAN_PollRxFifo0 填充） */
+        CAN_PollRxFifo0();
+        if (CAN_PollRx(&msg))
         {
-          ok = true;                                 /* ID 与长度对上即认为链路通 */
+          if ((msg.id == CAN_ID_CMD_A2B) && (msg.len == CAN_PAYLOAD_LEN))
+          {
+            ok = true;                               /* ID 与长度对上即认为链路通 */
+          }
+          break;
         }
-        break;
       }
+      g_canDiag.stage = 24U;
+      BSP_UART_BootMark("S3b: after rx poll");
     }
   }
   BSP_UART_BootMark(ok ? "S4: loopback RX OK" : "S4: loopback RX TIMEOUT");
 
   s_loopbackSelfTest = false;
+  g_canDiag.stage = 25U;
   BSP_UART_BootMark("S5: before restore CAN_Configure");
   if (CAN_Configure() != HAL_OK)                     /* 恢复正常模式 */
   {
     BSP_UART_BootMark("S5b: restore cfg FAILED");
     return false;
   }
+  g_canDiag.stage = 26U;
   BSP_UART_BootMark("S6: after restore");
   return ok;
 }
@@ -390,8 +451,184 @@ bool CAN_SelfTest(void)
   * @brief  主循环周期任务：调度bus-off指数退避恢复
   * @note   恢复动作（Stop->Start）放在主循环而非中断，避免中断里做耗时操作
   */
+/**
+  * @brief  轮询排空 RX FIFO0（主循环上下文，非中断）
+  * @note   【2026-10-12】替代原 HAL_FDCAN_RxFifo0Callback 的中断路径。
+  *         由 CAN_Task 每轮调用；逻辑与原回调一致，仅上下文不同。
+  */
+static void CAN_PollRxFifo0(void)
+{
+  FDCAN_HandleTypeDef *hfdcan = &hfdcan2;
+  FDCAN_RxHeaderTypeDef rxHeader;
+  uint8_t               rxData[CAN_PAYLOAD_LEN];
+  uint32_t              guard;
+
+  /* 判断 FIFO0 是否有新报文（读 RXF0S 的 F0FL 位） */
+  if ((hfdcan->Instance->IR & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
+  {
+    /* FIFO 满导致丢失：IR 中 MESSAGE_LOST 置位则清标志并计数 */
+    if ((hfdcan->Instance->IR & FDCAN_IT_RX_FIFO0_MESSAGE_LOST) != 0U)
+    {
+      __HAL_FDCAN_CLEAR_FLAG(hfdcan, FDCAN_FLAG_RX_FIFO0_MESSAGE_LOST);
+      s_stats.rxOverruns++;
+    }
+    return;
+  }
+
+  __HAL_FDCAN_CLEAR_FLAG(hfdcan, FDCAN_FLAG_RX_FIFO0_NEW_MESSAGE);
+
+  /* 硬上限 16 次：FIFO 深度仅 3，绝不允许在主循环里失控循环 */
+  guard = 0U;
+  while ((guard++ < 16U) &&
+         (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK))
+  {
+    uint8_t w     = s_rxW;
+    uint8_t next  = (uint8_t)((w + 1U) & (CAN_RX_RING_LEN - 1U));
+
+    if (next == s_rxR)
+    {
+      s_stats.rxOverruns++;                     /* 环形缓冲满：本帧丢弃并统计 */
+    }
+    else
+    {
+      CAN_RxMsg *slot = &s_rxRing[w];
+
+      slot->id        = rxHeader.Identifier;
+      slot->timestamp = rxHeader.RxTimestamp;
+      /* V1.2.3 的 DataLength 为原始 DLC：经典帧 DLC>8 时有效字节仍为 8 */
+      slot->len       = (rxHeader.DataLength > 8U) ? 8U : (uint8_t)rxHeader.DataLength;
+      for (uint8_t i = 0U; i < slot->len; i++)
+      {
+        slot->data[i] = rxData[i];
+      }
+      __DMB();                                 /* 先写数据后发布索引 */
+      s_rxW = next;
+    }
+    s_stats.rxCount++;
+  }
+
+  /* 排空后最后一次 GetRxMessage 会返回 FIFO_EMPTY 并粘滞置位 ErrorCode，
+   * 主动清除，否则协议错误计数会虚增 */
+  hfdcan->ErrorCode = HAL_FDCAN_ERROR_NONE;
+}
+
+/**
+  * @brief  轮询排空 Tx Event FIFO（主循环上下文，非中断）
+  * @note   【2026-10-12】替代原 HAL_FDCAN_TxEventFifoCallback 的中断路径。
+  */
+static void CAN_PollTxEvent(void)
+{
+  FDCAN_HandleTypeDef *hfdcan = &hfdcan2;
+  FDCAN_TxEventFifoTypeDef txEvent;
+  uint32_t              guard;
+
+  if ((hfdcan->Instance->IR & FDCAN_IT_TX_EVT_FIFO_NEW_DATA) == 0U)
+  {
+    if ((hfdcan->Instance->IR & FDCAN_IT_TX_EVT_FIFO_ELT_LOST) != 0U)
+    {
+      __HAL_FDCAN_CLEAR_FLAG(hfdcan, FDCAN_FLAG_TX_EVT_FIFO_ELT_LOST);
+      s_stats.txEvtLost++;
+    }
+    return;
+  }
+
+  __HAL_FDCAN_CLEAR_FLAG(hfdcan, FDCAN_FLAG_TX_EVT_FIFO_NEW_DATA);
+
+  guard = 0U;
+  while ((guard++ < 16U) &&
+         (HAL_FDCAN_GetTxEvent(hfdcan, &txEvent) == HAL_OK))
+  {
+    uint32_t latency = HAL_GetTick() - s_txTick[txEvent.MessageMarker];
+
+    s_stats.txAckCount++;
+    if (latency > s_stats.txMaxLatencyMs)
+    {
+      s_stats.txMaxLatencyMs = latency;         /* 入队->总线确认最大延迟 */
+    }
+
+    s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS;  /* 总线健康：复位退避 */
+  }
+
+  hfdcan->ErrorCode = HAL_FDCAN_ERROR_NONE;
+}
+
+/**
+  * @brief  轮询总线错误状态（主循环上下文，非中断）
+  * @note   【2026-10-12】替代原 HAL_FDCAN_ErrorStatusCallback 的中断路径。
+  */
+static void CAN_PollErrorStatus(void)
+{
+  FDCAN_HandleTypeDef *hfdcan = &hfdcan2;
+  uint32_t              ir    = hfdcan->Instance->IR;
+
+  if ((ir & FDCAN_IT_ERROR_PASSIVE) != 0U)
+  {
+    __HAL_FDCAN_CLEAR_FLAG(hfdcan, FDCAN_FLAG_ERROR_PASSIVE);
+    if ((s_busOffBackoffMs < CAN_BUSOFF_BACKOFF_MIN_MS) || (s_busOffBackoffMs == 0U))
+    {
+      s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS;
+    }
+  }
+
+  if ((ir & FDCAN_IT_BUS_OFF) != 0U)
+  {
+    __HAL_FDCAN_CLEAR_FLAG(hfdcan, FDCAN_FLAG_BUS_OFF);
+    /* 指数退避：1s -> 2s -> 4s ... -> 30s 封顶，避免故障总线上的重连风暴 */
+    if (s_busOffBackoffMs == 0U)
+    {
+      s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS;
+    }
+    else if (s_busOffBackoffMs < CAN_BUSOFF_BACKOFF_MAX_MS)
+    {
+      s_busOffBackoffMs *= 2U;
+      if (s_busOffBackoffMs > CAN_BUSOFF_BACKOFF_MAX_MS)
+      {
+        s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MAX_MS;
+      }
+    }
+    /* 记录到期时刻，由 CAN_Task 执行 Stop->Start 恢复 */
+    s_busOffDueTick = HAL_GetTick() + s_busOffBackoffMs;
+  }
+
+  if ((ir & FDCAN_IT_ERROR_WARNING) != 0U)
+  {
+    __HAL_FDCAN_CLEAR_FLAG(hfdcan, FDCAN_FLAG_ERROR_WARNING);
+  }
+}
+
 void CAN_Task(void)
 {
+  /* ---- 轮询路径（替代原 FDCAN2_IT0 中断）---- */
+  CAN_PollRxFifo0();
+  CAN_PollTxEvent();
+  CAN_PollErrorStatus();
+
+  /* ---- 发送停滞看门狗 ----
+   * 判据：Tx FIFO 长时间无空闲空间。正常发送时 3 个缓冲在几十微秒内就排空，
+   * 连续 500ms 满 = 帧根本发不出去（对端不 ACK / 位时序不匹配 / 总线断开），
+   * 此时必须主动 Abort，否则错误被动状态永远转不成 bus-off，也就永远不恢复。 */
+  if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan2) == 0U)
+  {
+    uint32_t nowMs = HAL_GetTick();
+
+    if (s_txStallSince == 0U)
+    {
+      s_txStallSince = nowMs;
+    }
+    else if ((nowMs - s_txStallSince) > CAN_TX_STALL_MS)
+    {
+      s_txStallSince = 0U;
+      g_canTxStallAborts++;
+      (void)HAL_FDCAN_AbortTxRequest(&hfdcan2,
+                                     FDCAN_TX_BUFFER0 | FDCAN_TX_BUFFER1 | FDCAN_TX_BUFFER2);
+    }
+  }
+  else
+  {
+    s_txStallSince = 0U;                       /* 有空间即视为健康，重置计时 */
+  }
+
+  /* ---- bus-off 退避恢复 ---- */
   if ((s_busOffDueTick != 0U) && ((int32_t)(HAL_GetTick() - s_busOffDueTick) >= 0))
   {
     s_busOffDueTick = 0U;
@@ -399,12 +636,8 @@ void CAN_Task(void)
     if (HAL_FDCAN_Stop(&hfdcan2) == HAL_OK)
     {
       (void)HAL_FDCAN_Start(&hfdcan2);
-      (void)HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0U);
-      (void)HAL_FDCAN_ActivateNotification(&hfdcan2,
-                                          FDCAN_IT_TX_EVT_FIFO_NEW_DATA | FDCAN_IT_TX_EVT_FIFO_ELT_LOST,
-                                          0U);
-      (void)HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_TX_COMPLETE, 0x07U);
-      (void)HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_BUS_OFF | FDCAN_IT_ERROR_PASSIVE, 0U);
+      /* 【2026-10-12】重启后不再挂中断，保持纯轮询 */
+      hfdcan2.ErrorCode = HAL_FDCAN_ERROR_NONE;
     }
     else
     {
@@ -560,8 +793,15 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 
   if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0U)
   {
+    uint32_t guard = 0U;                            /* 【2026-10-11】中断内硬上限：
+                                                     * 若 RXF0S/RXF0A 推进异常导致
+                                                     * GetRxMessage() 恒返回 OK，
+                                                     * 此处会变成中断内死循环 ->
+                                                     * 主循环无法喂狗 -> IWDG 复位。
+                                                     * FIFO 深度仅 3，取 16 次足够排空。 */
     /* 循环排空FIFO，避免高负载下滞留 */
-    while (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK)
+    while ((guard++ < 16U) &&
+           (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK))
     {
       uint8_t w     = s_rxW;
       uint8_t next  = (uint8_t)((w + 1U) & (CAN_RX_RING_LEN - 1U));
@@ -610,7 +850,13 @@ void HAL_FDCAN_TxEventFifoCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t TxEvent
 
   if ((TxEventFifoITs & FDCAN_IT_TX_EVT_FIFO_NEW_DATA) != 0U)
   {
-    while (HAL_FDCAN_GetTxEvent(hfdcan, &txEvent) == HAL_OK)
+    uint32_t guard = 0U;                        /* 【2026-10-11】与 Rx 排空同理：
+                                                 * GetTxEvent 若因 FIFO 索引异常恒返回
+                                                 * HAL_OK，此处会变成中断内死循环 ->
+                                                 * 主循环饿死 -> IWDG 复位。TEF 深度仅 3，
+                                                 * 取 16 次足够。 */
+    while ((guard++ < 16U) &&
+           (HAL_FDCAN_GetTxEvent(hfdcan, &txEvent) == HAL_OK))
     {
       uint32_t latency = HAL_GetTick() - s_txTick[txEvent.MessageMarker];
 

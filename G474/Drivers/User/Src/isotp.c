@@ -16,6 +16,12 @@
 #include "isotp.h"
 #include "can.h"
 #include <string.h>
+#if (CAN_NODE_ROLE == CAN_NODE_B)
+#include "bsp_uart.h"          /* 【临时取证】仅在 ECU 端打印 ISO-TP 内部事件 */
+#define ISOTP_TRACE(...)  BSP_UART_Printf(__VA_ARGS__)
+#else
+#define ISOTP_TRACE(...)  do { } while (0)
+#endif
 
 /*--------------------------------------- 内部类型 --------------------------------------*/
 typedef enum { RX_IDLE = 0, RX_COLLECT } RxState;
@@ -45,6 +51,16 @@ static uint8_t   s_txNextSn;
 static uint8_t   s_txBlockLeft;                  /* 当前块剩余CF数（0=无块限制） */
 static uint16_t  s_txStMinMs;                    /* 对端要求的CF间隔 */
 static uint32_t  s_txLastTick;                   /* STmin节拍/N_Bs计时 */
+static uint32_t  s_txBlockStartTick;             /* ★ 本块开始时刻（CF发送总超时基准） */
+
+/* 【2026-10-18 新增】CF 块的发送总超时。
+ * 原实现 TX_SENDING 分支**没有任何超时**：CAN_Send 失败时只把 s_txLastTick
+ * 刷成 now，于是 STmin 计时永远重新开始 —— 一旦总线持续 BUSY（Tx FIFO 满 /
+ * 对端不 ACK），状态机就永久停在 TX_SENDING。
+ * 后果：IsoTp_Send 永远返回 ISOTP_BUSY，上层（UDS/OTA）所有请求只能排队，
+ * 表现为"请求计数冻结、队列计数一直涨"，且没有任何错误上报。
+ * 145 帧 × STmin(1ms) ≈ 145ms，留 20 倍余量取 3000ms。 */
+#define ISOTP_TX_BLOCK_TIMEOUT_MS   3000U
 
 /**
   * @brief  初始化ISO-TP通道
@@ -71,7 +87,12 @@ static void IsoTp_SendFc(uint8_t fs, uint8_t bs, uint8_t stmin)
   frame[0] = fs;
   frame[1] = bs;
   frame[2] = stmin;
-  (void)CAN_Send(s_txId, frame, 3U);
+  {
+    /* ⚠️ 这里不能打印：FF 到达瞬间就要回 FC，任何 UART 输出（约 2.6ms）
+     *    都会把对端随即而来的 CF 挡在 3 项深的硬件 RX FIFO 之外，
+     *    实测丢的就是 SN=1（got=2 want=1），整块随即作废。 */
+    (void)CAN_Send(s_txId, frame, 3U);
+  }
 }
 
 /**
@@ -171,16 +192,16 @@ static void IsoTp_RxFrame(const uint8_t *data, uint8_t len)
     s_rxState   = RX_COLLECT;
     s_rxLastTick = HAL_GetTick();
 
-    /* FC: FS=CTS, BS=0(不限块), STmin=1ms
-     * 【2026-10-12 两轮实测修正】
-     *   初版 STmin=2ms：每帧 CF 都等 2ms，一个 1010 字节的 0x36 块 = 145 帧
-     *   ≈ 290ms/块，整镜像需~23s，客户端每轮只传8 块就超时。
-     *   改 STmin=0 后速率上去了，但**板 A 侧出现"0x36 发完收不到任何应答"**：
-     *   CF 之间零间隔会让对端 IsoTp_RxFrame 与本端 CAN 轮询抢占，CAN 溢出丢帧
-     *   （表现为 s_dl 已回 IDLE、received 已满，但对端一个字节应答都没发出）。
-     *   取 1ms：79 块 × 145 帧 × 1ms ≈ 11.5s，远小于客户端 30s 传输超时，
-     *   同时给对端留足处理余量。 */
-    IsoTp_SendFc(0x30U, 0x00U, 0x01U);
+
+    /* FC: FS=CTS, BS=0(不限块), STmin=8ms
+     * 【2026-10-18】接收侧容忍窗口 = STmin × 硬件 RX FIFO 深度。
+     *   HAL 把 SRAMCAN_RF0_NBR 硬编码为 3（vendor 文件不可改），
+     *   而板B 主循环存在阻塞段：2KB Flash 页写、UART 诊断打印、
+     *   软 SPI 刷屏 —— 单段可达 10~25ms。STmin=1/2ms 时
+     *   （容忍 3/6ms）每块必丢一帧，实测每块都要重发一次。
+     *   取 8ms → 容忍 24ms；单块 144 CF × 8ms ≈ 1.15s，
+     *   79 块 ≈ 91s，仍远小于客户端单块 5s 窗口与整体流程预期。 */
+    IsoTp_SendFc(0x30U, 0x00U, 0x08U);
   }
   else if (pci == 0x2U)                           /* CF */
   {
@@ -192,6 +213,7 @@ static void IsoTp_RxFrame(const uint8_t *data, uint8_t len)
     uint8_t sn = (uint8_t)(data[0] & 0x0FU);
     if (sn != s_rxNextSn)
     {
+      ISOTP_TRACE("[tp] CF SN err got=%u want=%u\r\n", (unsigned)sn, (unsigned)s_rxNextSn);
       s_rxState = RX_IDLE;
       if (s_errCb != NULL)
       {
@@ -209,6 +231,7 @@ static void IsoTp_RxFrame(const uint8_t *data, uint8_t len)
 
     if (s_rxGot >= s_rxExpect)
     {
+      ISOTP_TRACE("[tp] CF done got=%u\r\n", (unsigned)s_rxGot);
       s_rxState = RX_IDLE;
       if (s_rxCb != NULL)
       {
@@ -242,6 +265,7 @@ static void IsoTp_RxFrame(const uint8_t *data, uint8_t len)
       }
       s_txState   = TX_SENDING;
       s_txLastTick = HAL_GetTick();
+      s_txBlockStartTick = s_txLastTick;          /* ★ CF 块计时起点 */
     }
     else if (fs == 0x1U)                          /* Wait：刷新N_Bs继续等 */
     {
@@ -269,6 +293,9 @@ void IsoTp_OnCanFrame(uint32_t id, const uint8_t *data, uint8_t len)
 {
   if ((id == s_rxId) && (len >= 1U) && (len <= CAN_PAYLOAD_LEN))
   {
+    /* ⚠️ 这里**不能**逐帧打印：115200 下一条约 40 字节 ≈ 3.5ms，
+     *    而 CF 节拍是 1ms —— 打印本身会把接收环形缓冲（16 项）挤爆，
+     *    造成 SN 跳号（实测 got=7 want=6）。只在事件点打印。 */
     IsoTp_RxFrame(data, len);
   }
 }
@@ -294,11 +321,30 @@ void IsoTp_Task(void)
   }
   else if (s_txState == TX_SENDING)
   {
-    if ((now - s_txLastTick) >= s_txStMinMs)      /* STmin节拍到 */
+    /* ★ 先判总超时：避免 CAN 持续 BUSY 时永久自锁在 TX_SENDING。
+     *   必须放在 STmin 判定之前 —— 失败路径会刷新 s_txLastTick，
+     *   若只用 STmin 判定，这个状态永远走不出去。 */
+    if ((now - s_txBlockStartTick) > ISOTP_TX_BLOCK_TIMEOUT_MS)
+    {
+      s_txState = TX_IDLE;
+      if (s_errCb != NULL)
+      {
+        s_errCb(ISOTP_TIMEOUT);
+      }
+    }
+    else if ((now - s_txLastTick) >= s_txStMinMs) /* STmin节拍到 */
     {
       uint8_t frame[CAN_PAYLOAD_LEN];
       uint8_t n = 0U;
-      /* ★★ 必须用局部游标 i，不能原地推进 s_txSent。
+
+      /* ★ PCI 字节必须最先写入：0x2? = 连续帧(CF) + 序号 SN。
+       * 【2026-10-18 修复】上一次重构时这一行被误删，导致载荷从 frame[0]
+       *   开始写、整个 CF 帧**左移一字节**，对端看到的 b0 = 载荷首字节
+       *   （实测 b0..3 = 80 00 01 37，正是 s_txbuf[6..9]），PCI 丢失后
+       *   对端按 PCI=8/6 判为无效帧直接丢弃 → 多帧永远收不全。
+       *   证据：FF 帧（PCI 在 IsoTp_Send 里写）完全正常，只有 CF 异常。 */
+      frame[n++] = (uint8_t)(0x20U | s_txNextSn);
+      /* ★ 必须用局部游标 i，不能原地推进 s_txSent：
        *   原因：s_txSent 只在 CAN_Send 成功后才能提交（见下），
        *   若此处直接 s_txSent++，FIFO 满时这 7 字节会被丢弃却已计入 SN 进度。
        *   【2026-10-13 根因修复】原实现写成
