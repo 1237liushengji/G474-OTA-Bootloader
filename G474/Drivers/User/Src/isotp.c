@@ -16,8 +16,16 @@
 #include "isotp.h"
 #include "can.h"
 #include <string.h>
-#if (CAN_NODE_ROLE == CAN_NODE_B)
-#include "bsp_uart.h"          /* 【临时取证】仅在 ECU 端打印 ISO-TP 内部事件 */
+/* 【2026-10-18 清理】ISO-TP 事件取证打印，出厂默认关闭。
+ * ⚠️ 绝对不能把逐帧打印放进热路径：115200 下一条约 40 字节 ≈ 3.5ms，
+ *    而 CF 节拍是 2ms —— 打印本身就会把接收缓冲挤爆，制造"SN 跳号"假象
+ *    （本项目曾被自己加的探针误导过一轮）。需要排查时把它置 1 再重编。 */
+#ifndef ISOTP_TRACE_ENABLE
+#define ISOTP_TRACE_ENABLE    0
+#endif
+
+#if (ISOTP_TRACE_ENABLE != 0)
+#include "bsp_uart.h"
 #define ISOTP_TRACE(...)  BSP_UART_Printf(__VA_ARGS__)
 #else
 #define ISOTP_TRACE(...)  do { } while (0)

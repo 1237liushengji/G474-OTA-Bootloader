@@ -215,25 +215,9 @@ void PendSV_Handler(void)
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
-  /* 【2026-10-12】主循环阶段 1ms 采样（停摆定位，定位后可删）。
-   * 主循环每次进任务前更新 g_loopStage；这里每 1ms 采一次并存下"已持续
-   * 多久没变"。若 age 超过 2500ms 而循环没有推进，即可判定卡死在
-   * g_loopStageSample 对应的任务里。 */
-  {
-    extern volatile uint8_t  g_loopStage;
-    extern volatile uint8_t  g_loopStageSample;
-    extern volatile uint32_t g_loopStageAge;
-
-    if (g_loopStageSample != g_loopStage)
-    {
-      g_loopStageSample = g_loopStage;
-      g_loopStageAge    = 0U;
-    }
-    else
-    {
-      g_loopStageAge++;
-    }
-  }
+  /* 【2026-10-18 清理】原"主循环阶段 1ms 采样"已随 g_loopStage* 一起移除。
+   * 它把每个任务入口写成全局变量并在 1ms 中断里累加 age，纯属排障脚手架，
+   * 出厂版本不需要，也不应在 1ms 中断里做无意义的比较与写操作。 */
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */

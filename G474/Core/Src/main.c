@@ -121,24 +121,10 @@ __attribute__((section(".noinit"))) volatile uint32_t g_rstSftCnt;
 __attribute__((section(".noinit"))) volatile uint32_t g_rstIwdgCnt;
 __attribute__((section(".noinit"))) volatile uint32_t g_rstWwdgCnt;
 
-/* ============ 【2026-10-12】主循环停摆定位 instrumentation ============
- * 现象：APP 启动日志打到 [usb] (t≈2981) 后串口静默，约 3~4 秒后被 IWDG
- * 复位（RCC_CSR bit29=IWDGRSTF 实证）。LCD 的 tick 却仍能走到 3~4，
- * 即"循环还活着但串口不再出数"与"循环真的卡死"两种可能无法区分。
- *
- * 三个量（均非 static，可用 SWD 直接读，也进 .map）：
- *   g_loopStage       当前正在执行的任务号（1..11，每次进任务前更新）
- *   g_loopStageSample SysTick(1ms) 最近一次采到的阶段号
- *   g_loopStageAge    该阶段已持续多少 ms（>2500ms 基本可断定卡死）
- *   g_loopCnt         主循环迭代计数
- * 判读：
- *   - [hb] 心跳行在 t>5001 后仍在出  => 循环活着，问题在串口/USART
- *   - [hb] 停在 t≈3000 且 age 持续涨 => 循环卡死，最后一行 st=N 即元凶任务
- * ==================================================================== */
-volatile uint8_t  g_loopStage;         /* 1..11：见主循环 STAGE 编号 */
-volatile uint8_t  g_loopStageSample;   /* SysTick 1ms 采样值 */
-volatile uint32_t g_loopStageAge;      /* 当前阶段持续 ms 数 */
-volatile uint32_t g_loopCnt;           /* 主循环迭代次数 */
+/* 【2026-10-18 清理】原"主循环停摆定位"instrumentation（g_loopStage /
+ * g_loopStageSample / g_loopStageAge / g_loopCnt + [hb] 心跳行）已整段移除。
+ * 该类脚手架在排障期很有用，但会持续污染串口日志并占用 RAM；
+ * 若将来再次怀疑主循环卡死，可用 SWD 直接读 PC 或复检 `docs/13` 的方法。 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -993,42 +979,21 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* ===== 【2026-10-12】主循环心跳 + 阶段采样（停摆定位，定位后可整段删除）=====
-     * 每 100ms 一行。st = SysTick 最近采到的阶段；age = 该阶段持续的 ms 数。
-     * 若日志在此后静默而 age 持续增大 => 循环卡死，st 即元凶任务；
-     * 若日志在此后仍持续而出 => 循环活着，问题在串口/USART 侧。 */
-    {
-      static uint32_t s_hbLast = 0U;
-      uint32_t tn = HAL_GetTick();
-
-      if ((tn - s_hbLast) >= 100U)
-      {
-        s_hbLast = tn;
-        BSP_UART_Printf("[hb] t=%lu st=%u age=%lu n=%lu\r\n",
-                        (unsigned long)tn,
-                        (unsigned)g_loopStageSample,
-                        (unsigned long)g_loopStageAge,
-                        (unsigned long)g_loopCnt);
-      }
-    }
-    g_loopCnt++;
-
-#define APP_LOOP_TASK(stage, call) \
-    do { g_loopStage = (uint8_t)(stage); (void)(call); } while (0U)
-
-    APP_LOOP_TASK(1,  App_Process());
-    APP_LOOP_TASK(2,  UsbCdc_Task());                   /* USB CDC 发送推进（非阻塞） */
-    APP_LOOP_TASK(3,  Console_Task());                  /* 串口命令行控制台 */
-    APP_LOOP_TASK(4,  BSP_UART_RxPinPulse());           /* PA10 累计跳变监视 */
-    APP_LOOP_TASK(5,  BSP_UART_PinMonitor());           /* 全端口跳变监视 */
-    APP_LOOP_TASK(6,  BSP_UART_DiagTask());             /* UART 接收链路自诊断 */
-    APP_LOOP_TASK(7,  CAN_Task());                      /* bus-off 指数退避恢复调度 */
-    APP_LOOP_TASK(8,  IsoTp_Task());                    /* ISO-TP：STmin 节拍/超时 */
-    APP_LOOP_TASK(9,  Uds_Task());                      /* UDS：S3 会话/客户端超时 */
-    APP_LOOP_TASK(10, Ota_Task());                      /* OTA：试运行自检通过后落定 */
-    APP_LOOP_TASK(11, LcdUi_Task());                    /* LCD：1 秒刷新一次状态指征 */
-    APP_LOOP_TASK(12, OtaClient_Task());                /* 【2026-10-12】板A 板内 OTA 发起状态机 */
-#undef APP_LOOP_TASK
+    /* 【2026-10-18 清理】排障期的"主循环心跳 + 阶段采样"脚手架已移除。
+     * 它每 100ms 打一行 [hb]，并把每个任务的进入点写成全局变量供 SWD 观察；
+     * 问题定位完毕后既占空间又污染日志（实测 [hb] 一秒钟十行）。
+     * 同理，BSP_UART_RxPinPulse / PinMonitor / DiagTask 这三个
+     * "串口接收链路自诊断"任务也已从主循环摘除 —— 它们每 6 秒集中打印
+     * 约 300 字节，单次阻塞 20ms 以上，是 ISO-TP 连续帧丢失的主要来源之一。 */
+    App_Process();                             /* CAN 收帧分发 / 链路调度 */
+    UsbCdc_Task();                             /* USB CDC 发送推进（非阻塞） */
+    Console_Task();                            /* 串口命令行控制台 */
+    CAN_Task();                                /* 轮询收发 + bus-off/发送停滞恢复 */
+    IsoTp_Task();                              /* ISO-TP：STmin 节拍 / 超时 */
+    Uds_Task();                                /* UDS：S3 会话 / 客户端超时 */
+    Ota_Task();                                /* OTA：试运行自检通过后落定 */
+    LcdUi_Task();                              /* LCD：1 秒刷新（OTA 期间自动让路） */
+    OtaClient_Task();                          /* 板A 的 OTA 发起状态机 */
 
     HAL_IWDG_Refresh(&hiwdg);                      /* 喂狗（主循环健康证明） */
     /* USER CODE END WHILE */
